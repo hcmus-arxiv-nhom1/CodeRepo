@@ -84,3 +84,16 @@ python -m src.parser.sample_set --data-root data/corpus --work-dir work --out da
 ```
 
 Trong code: `gather(version_dir)` trả về file gốc và danh sách file `.tex` tới được theo `\input`/`\include`; `expand(version_dir)` trả về toàn văn của file gốc với các `\input`/`\include` đã được thay bằng nội dung file con.
+
+## Tài liệu tham khảo (crawler và gathering)
+
+Các tài liệu trực tuyến mà code crawler và `gather.py` dựa vào:
+
+1. HCMUS CS TA. (2026). *Project Milestone 1 — Data Crawling* và *Milestone 2 — Hierarchical Parsing and Standardization*. https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/ — yêu cầu chỉ giữ `.tex`/`.bib`, record rỗng, quy tắc tìm file gốc và `\input`/`\include`.
+2. arXiv.org. *arXiv API User's Manual*. https://info.arxiv.org/help/api/user-manual.html — `id_list`, hậu tố version của ID, các trường Atom (`published`, `updated`, `journal_ref`, `doi`).
+3. arXiv.org. *Terms of Use for arXiv APIs*. https://info.arxiv.org/help/api/tou.html — nhịp ≥ 3 giây giữa các request, một kết nối.
+4. arXiv.org. *Open Archives Initiative (OAI) — arXiv info*. https://info.arxiv.org/help/oa/index.html — OAI-PMH `GetRecord` với `metadataPrefix=arXivRaw` tại `https://oaipmh.arxiv.org/oai`.
+5. arXiv.org. *Media types*. https://info.arxiv.org/help/mimetypes.html — các dạng source mà `/src/` trả về (tar.gz, gzip một file, PDF, HTML).
+6. Cornell University. (2025). *arXiv Dataset*. Kaggle. https://www.kaggle.com/datasets/Cornell-University/arxiv — Kaggle snapshot tuỳ chọn (`--snapshot`).
+7. Allen Institute for AI. (2026). *Semantic Scholar Academic Graph API*. https://api.semanticscholar.org/api-docs/ — giới hạn tốc độ dùng cho `semantic_scholar_limiter()`.
+8. Python Software Foundation. *tarfile*, *gzip*, *zipfile* — Python 3.12 standard library documentation. https://docs.python.org/3.12/library/archiving.html — đọc archive từng member, không dùng `extractall`.
