@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """Crawl one ID range end to end, with per-version checkpoint and resume.
 
 Usage:
