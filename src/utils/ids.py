@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """arXiv ID helpers shared by the crawler (M1), parser (M2) and dataset export (M3).
 
 Conventions (see the M1 statement):

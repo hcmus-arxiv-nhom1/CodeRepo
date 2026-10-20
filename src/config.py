@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """Shared constants. Secrets (Semantic Scholar key, Kaggle token) come from env / Colab Secrets."""
 
 from __future__ import annotations
