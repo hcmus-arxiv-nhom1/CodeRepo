@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """Detect the source type, unpack, keep text files only.
 
 ``/src/`` returns whatever the authors submitted, so the type is detected from magic
