@@ -6,7 +6,16 @@ import pytest
 from src.crawler.http_client import BlockedError, HttpClient
 from src.crawler.ratelimit import RateLimiter
 from src.run_pipeline import load_version_state, run
-from src.tests.helpers import MAIN_TEX, PNG, FakeResponse, FakeSession, atom_feed, query, tar_bytes
+from src.tests.helpers import (
+    MAIN_TEX,
+    PNG,
+    FakeResponse,
+    FakeSession,
+    atom_feed,
+    gzip_bytes,
+    query,
+    tar_bytes,
+)
 
 VERSIONS = {"2606.00001": 1, "2606.00002": 2, "2606.00003": 1}  # 2606.00003 is PDF-only
 IDS = list(VERSIONS)
@@ -15,12 +24,15 @@ IDS = list(VERSIONS)
 class FakeArxiv:
     """Answers API and /src/ requests; can simulate a kill or a broken version."""
 
-    def __init__(self, kill_after_downloads=None, src_status=None, kill_exc=KeyboardInterrupt):
+    def __init__(
+        self, kill_after_downloads=None, src_status=None, kill_exc=KeyboardInterrupt, src_body=None
+    ):
         self.downloads = []
         self.api_calls = 0
         self.kill_after = kill_after_downloads
         self.kill_exc = kill_exc
         self.src_status = src_status or {}
+        self.src_body = src_body or {}  # name -> (body, filename): override a /src/ response
 
     def __call__(self, url):
         if "/api/query" in url:
@@ -38,7 +50,9 @@ class FakeArxiv:
         self.downloads.append(name)
         if name in self.src_status:
             return FakeResponse(self.src_status[name])
-        if name.startswith("2606.00003"):
+        if name in self.src_body:
+            body, filename = self.src_body[name]
+        elif name.startswith("2606.00003"):
             body, filename = b"%PDF-1.5\n" + PNG, f"arXiv-{name}.pdf"
         else:
             body, filename = (
@@ -133,6 +147,16 @@ def test_failed_version_is_reported_and_retried(tmp_path):
     retry = FakeArxiv()
     summary = crawl(tmp_path, retry)
     assert retry.downloads == ["2606.00002v2"] and summary["papers_complete"] == 3
+
+
+def test_gzipped_html_submission_is_an_empty_record_not_a_failure(tmp_path):
+    """2606.25881v1 (EPTCS proceedings) was failing on every run before the html.gz kind."""
+    page = gzip_bytes(b"<!DOCTYPE html>\n<html><title>EPTCS 446</title></html>\n")
+    fake = FakeArxiv(src_body={"2606.00001v1": (page, "arXiv-2606.00001v1.html.gz")})
+    summary = crawl(tmp_path, fake)
+    assert summary["version_status"] == {"ok": 2, "no_tex": 2} and summary["failed_rows"] == 0
+    assert summary["version_kinds"]["html.gz"] == 1
+    assert list((tmp_path / "corpus" / "2606-00001" / "v1").iterdir()) == []
 
 
 def test_missing_source_is_an_empty_record(tmp_path):
