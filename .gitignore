@@ -1,0 +1,49 @@
+# --- Data: the code repo holds source only (statement M1) ---
+data/
+corpus/
+work/
+logs/
+*.src
+*.tar
+*.tar.gz
+*.gz
+*.tgz
+*.zip
+*.part
+*.parquet
+*.csv
+*.jsonl
+arxiv-metadata-oai-snapshot.json
+failed.csv
+qa_report.csv
+run_stats.json
+checkpoint*.db
+*.sqlite
+*.db
+
+# --- Personal notes / team plan: not source, keep local ---
+INSTRUCT.MD
+arXiv Project*.md
+
+# --- Secrets ---
+.env
+kaggle.json
+*.key
+
+# --- Python / tooling ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+build/
+dist/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+# Development tools (lint, format, test). Not needed to run the pipeline.
+#   pip install -r src/requirements.txt -r src/requirements-dev.txt
+pytest==9.1.1
+ruff==0.17.1
+pre-commit==4.7.0
+nbstripout==0.9.1
