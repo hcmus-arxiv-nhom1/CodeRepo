@@ -3,6 +3,8 @@
 ``/src/`` returns whatever the authors submitted, so the type is detected from magic
 bytes, never from the file name: gzipped tar (the usual case), a single gzipped file
 (normally one .tex), plain tar/zip, PDF or PostScript (no TeX), or an HTML page.
+Gzipped HTML (``html.gz``) is a real submission, e.g. a workshop proceedings volume
+(2606.25881 is an EPTCS index page); plain ``html`` on HTTP 200 is likely an error page.
 
 Only files whose extension is in ``keep_extensions`` are written; .tex content is never
 modified, so ``figure`` environments and ``\\includegraphics`` lines stay for M2.
@@ -42,7 +44,7 @@ TEX_MARKERS = (
     b"\\author",
     b"\\bye",
 )
-NO_TEX_KINDS = frozenset({"pdf", "ps", "html", "text", "empty", "unknown"})
+NO_TEX_KINDS = frozenset({"pdf", "ps", "html", "html.gz", "text", "empty", "unknown"})
 _WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
     f"{p}{i}" for p in ("COM", "LPT") for i in range(1, 10)
 }
@@ -56,7 +58,7 @@ class CorruptArchiveError(Exception):
 
 @dataclass
 class ExtractResult:
-    kind: str  # tar.gz | tar | gz | tex | zip | pdf | ps | html | text | empty | unknown
+    kind: str  # tar.gz | tar | gz | tex | zip | pdf | ps | html | html.gz | text | empty | unknown
     has_tex: bool = False
     files: list[str] = field(default_factory=list)  # kept files, posix paths inside vN/
     archive_bytes: int = 0  # size of the downloaded file
@@ -116,7 +118,9 @@ def detect_kind(path: Path) -> str:
     inner_kind = _sniff(inner)
     if inner_kind == "tar" or (inner_kind in ("text", "unknown") and _is_tar(path)):
         return "tar.gz"  # second test catches old tar formats without the ustar magic
-    if inner_kind in ("pdf", "ps", "html", "empty"):
+    if inner_kind == "html":
+        return "html.gz"  # submitted HTML (proceedings index), not an error page
+    if inner_kind in ("pdf", "ps", "empty"):
         return inner_kind
     return "gz"  # one compressed file, normally a .tex
 

@@ -91,6 +91,15 @@ def test_gzipped_pdf_is_detected(tmp_path):
     assert detect_kind(archive) == "pdf"
 
 
+def test_gzipped_html_is_a_submission_without_tex(tmp_path):
+    """2606.25881v1 (EPTCS proceedings): /src/ serves arXiv-2606.25881v1.html.gz."""
+    page = b"<!DOCTYPE html>\n<html><head><title>EPTCS 446</title></head></html>\n"
+    archive = write(tmp_path, "a.src", gzip_bytes(page, name="index.html"))
+    res = extract_version(archive, tmp_path / "v1")
+    assert res.kind == "html.gz" and not res.has_tex and res.files == []
+    assert detect_kind(write(tmp_path, "raw", page)) == "html"  # unwrapped: error page
+
+
 def test_plain_tar_zip_tex_and_html(tmp_path):
     assert (
         detect_kind(write(tmp_path, "t", tar_bytes({"main.tex": MAIN_TEX}, compress=False)))
