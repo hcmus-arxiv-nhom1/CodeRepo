@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 # Tool configuration only (Ruff, pytest). Dependencies live in src/requirements.txt.
 [tool.ruff]
 line-length = 100
