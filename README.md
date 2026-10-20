@@ -1,5 +1,7 @@
 # CodeRepo
 
+<!-- Phần crawler/gather của README được soạn với sự hỗ trợ của AI assistant (Claude, Anthropic), ghi nguồn theo quy định môn học. -->
+
 ## Crawler (M1)
 
 Chạy trong thư mục gốc của repo, sau khi cài `pip install -r src/requirements.txt`.
