@@ -1,0 +1,13 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
+# Tool configuration only (Ruff, pytest). Dependencies live in src/requirements.txt.
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests"]
+pythonpath = ["."]
