@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """Entry discovery and paper metadata.
 
 For a list of IDs: find every paper, how many versions it has, and the submission date
