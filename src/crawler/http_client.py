@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """Polite HTTP client shared by every arXiv call (API, OAI-PMH, /src/).
 
 - every request runs inside the shared ``RateLimiter`` (one connection, >= 3 s apart);
