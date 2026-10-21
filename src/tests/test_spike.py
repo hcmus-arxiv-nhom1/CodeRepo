@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 from src import config
 from src.spike import analyse, find_last_id, sample_ids
 

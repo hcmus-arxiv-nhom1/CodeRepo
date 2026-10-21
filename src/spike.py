@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """GĐ1 spike tools.
 
     python -m src.spike month-end 2606 --guess 32040   # last ID of a month, via the API

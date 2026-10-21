@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """Rate limiters. One shared instance for every arXiv host; a separate one for Semantic Scholar.
 
 A limiter is used as a context manager around the *whole* HTTP call, body included::

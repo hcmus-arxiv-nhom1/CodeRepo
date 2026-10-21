@@ -1,3 +1,4 @@
+# Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 """Download ``https://export.arxiv.org/src/{id}v{N}`` for one version.
 
 Pacing, retries, ``Retry-After``, the 403 circuit breaker and the ``.part`` handling live
