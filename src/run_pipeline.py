@@ -17,7 +17,8 @@ Outputs:
 
 Re-running the same command skips every version whose latest record is ok / no_tex /
 unavailable and whose vN/ folder exists, so a killed run resumes where it stopped and
-failed versions are retried.
+failed versions are retried. Only one run at a time may use a work directory
+(``<work-dir>/run.lock``), so arXiv never sees two connections from one machine.
 
 Reference metadata (Semantic Scholar) is crawled in a background thread when
 ``src/crawler/references.py`` provides ``crawl(arxiv_ids: list[str], data_root: Path)``:
@@ -50,6 +51,7 @@ from src.crawler.downloader import download_version
 from src.crawler.extract import CorruptArchiveError, extract_version
 from src.crawler.http_client import HttpClient
 from src.crawler.ratelimit import get_arxiv_limiter
+from src.crawler.worklock import WorkDirLock, WorkDirLockedError
 from src.utils.ids import iter_id_range, to_folder_name
 
 log = logging.getLogger("src.run_pipeline")
@@ -162,6 +164,7 @@ def process_version(
             bytes_before=res.bytes_before,
             bytes_after=res.bytes_after,
             skipped_unsafe=res.skipped_unsafe,
+            dropped=res.dropped,
             extract_s=_since(t_extract),
         )
         if res.kind in SUSPICIOUS_KINDS:
@@ -293,6 +296,8 @@ def run(
     """Discover ``ids``, then download and extract every version not done yet."""
     data_root.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
+    lock = WorkDirLock(work_dir)
+    lock.acquire()  # raises WorkDirLockedError if another run uses this work_dir
     tmp_dir = work_dir / "tmp"
     archive_dir = work_dir / "archives" if keep_archives else None
     client = client or HttpClient(get_arxiv_limiter(), config.USER_AGENT)
@@ -409,6 +414,7 @@ def run(
         (work_dir / "run_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         with open(work_dir / "runs.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps(summary) + "\n")
+        lock.release()
     return summary
 
 
@@ -526,6 +532,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted: re-run the same command to resume", file=sys.stderr)
         return 130
+    except WorkDirLockedError as exc:
+        print(f"not started: {exc}", file=sys.stderr)
+        return 2
     print(
         json.dumps(
             {

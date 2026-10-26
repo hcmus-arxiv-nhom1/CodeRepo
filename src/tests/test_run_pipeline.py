@@ -6,6 +6,7 @@ import pytest
 
 from src.crawler.http_client import BlockedError, HttpClient
 from src.crawler.ratelimit import RateLimiter
+from src.crawler.worklock import WorkDirLock, WorkDirLockedError
 from src.run_pipeline import load_version_state, run
 from src.tests.helpers import (
     MAIN_TEX,
@@ -104,6 +105,21 @@ def test_end_to_end_layout_and_summary(tmp_path):
     assert summary["version_status"] == {"ok": 3, "no_tex": 1}
     assert summary["failed_rows"] == 0
     assert not (tmp_path / "work" / "tmp").exists()
+    state = load_version_state(tmp_path / "work" / "versions.jsonl")
+    assert state[("2606.00001", 1)]["dropped"] == {".png": {"files": 1, "bytes": len(PNG)}}
+
+
+def test_second_run_on_same_work_dir_is_refused(tmp_path):
+    with WorkDirLock(tmp_path / "work"):
+        with pytest.raises(WorkDirLockedError):
+            crawl(tmp_path, FakeArxiv())
+    crawl(tmp_path, FakeArxiv())  # free again once the first run is gone
+
+
+def test_lock_is_released_when_a_run_stops_on_an_error(tmp_path):
+    with pytest.raises(BlockedError):
+        crawl(tmp_path, FakeArxiv(kill_after_downloads=1, kill_exc=BlockedError("u", "403", 403)))
+    assert crawl(tmp_path, FakeArxiv())["papers_complete"] == 3
 
 
 def test_resume_after_kill_does_not_download_finished_versions(tmp_path):

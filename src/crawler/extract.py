@@ -66,6 +66,14 @@ class ExtractResult:
     bytes_before: int = 0
     bytes_after: int = 0
     skipped_unsafe: int = 0  # links, path traversal, names unusable on this OS
+    # Files left out by the whitelist: extension (".png", "" when none) or, for a source
+    # without any archive member, "(pdf)" / "(html.gz)"... -> {"files": n, "bytes": size}.
+    dropped: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def drop(self, key: str, size: int) -> None:
+        entry = self.dropped.setdefault(key, {"files": 0, "bytes": 0})
+        entry["files"] += 1
+        entry["bytes"] += size
 
 
 # --------------------------------------------------------------------------- detection
@@ -204,6 +212,7 @@ def _extract_tar(archive: Path, out_dir: Path, keep: frozenset[str], res: Extrac
                     res.skipped_unsafe += 1
                     continue
                 if not _keep(rel, keep):
+                    res.drop(rel.suffix.lower(), member.size)
                     continue
                 src = tf.extractfile(member)
                 if src is None:
@@ -233,6 +242,7 @@ def _extract_zip(archive: Path, out_dir: Path, keep: frozenset[str], res: Extrac
                     res.skipped_unsafe += 1
                     continue
                 if not _keep(rel, keep):
+                    res.drop(rel.suffix.lower(), info.file_size)
                     continue
                 with zf.open(info) as src:
                     if not _write_member(src, out_dir, rel):
@@ -258,10 +268,13 @@ def _extract_single(
     data: bytes, name: str | None, out_dir: Path, keep: frozenset[str], res: ExtractResult
 ) -> None:
     res.bytes_before = len(data)
-    if _sniff(data[:HEAD_BYTES]) not in ("tex", "text"):
+    sniffed = _sniff(data[:HEAD_BYTES])
+    if sniffed not in ("tex", "text"):
+        res.drop(f"({sniffed})", len(data))
         return  # PDF, PostScript, HTML, binary...: empty record
     named_tex = name is not None and name.lower().endswith(".tex")
     if not (named_tex or _looks_like_tex(data)):
+        res.drop("(text)", len(data))
         return  # plain text that is not TeX: empty record
     rel = _single_file_name(name, keep)
     (out_dir / rel).write_bytes(data)
@@ -301,6 +314,8 @@ def extract_version(
         _extract_single(archive.read_bytes(), filename_hint, out_dir, keep, res)
     else:  # pdf, ps, html, text, empty, unknown: no TeX source
         res.bytes_before = res.archive_bytes
+        if res.archive_bytes:
+            res.drop(f"({res.kind})", res.archive_bytes)
 
     res.files.sort()
     res.has_tex = any(f.lower().endswith(".tex") for f in res.files)
