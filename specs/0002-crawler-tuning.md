@@ -1,33 +1,33 @@
 <!-- Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules. -->
-# Spec 0002 — Tinh chỉnh crawler cho lần crawl chính thức
+# Spec 0002 — Crawler tuning for the official crawl
 
-- **Tác giả:** Thiên (Member 1) · **Reviewer:** Đăng, Hiếu · **Trạng thái:** chờ duyệt
-- **Ngày:** 27/10/2026 · **Branch:** `feat/crawler-tuning`
+- **Author:** Thiên (Member 1) · **Reviewers:** Đăng, Hiếu · **Status:** awaiting review
+- **Date:** 27/10/2026 · **Branch:** `feat/crawler-tuning`
 
-## Bối cảnh
+## Context
 
-Thầy xác nhận điều được chấm là pipeline cào có tối ưu không, đo trên Google Colab chỉ dùng CPU. Mọi nhóm đều bị giới hạn bởi quy định của arXiv: *"wait at least 3 seconds between successive calls and use one connection at a time"*, và giới hạn này tính trên *"all of the machines under your control as a whole"* [1]. Vì vậy chỉ còn hai hướng tối ưu: bỏ thời gian chờ thừa, và không bao giờ vô tình gọi arXiv song song.
+The lecturer confirmed that what is graded is how efficient the crawling pipeline is, measured on Google Colab in CPU-only mode. Every group is bound by the same arXiv rule, *"wait at least 3 seconds between successive calls and use one connection at a time"*, and that limit applies to *"all of the machines under your control as a whole"* [1]. Only two levers remain: remove idle time, and never call arXiv in parallel by accident.
 
-## Thay đổi
+## Changes
 
-| # | Thay đổi | Lý do | Kiểm chứng |
+| # | Change | Reason | Verification |
 | --- | --- | --- | --- |
-| 1 | `ARXIV_JITTER_S` 0,5 → **0,1 s** (`config.py`) | Khoảng cách trung bình giữa hai lần bắt đầu request giảm từ 3,25 s xuống 3,05 s, tức nhanh hơn khoảng 6 %. Khoảng cách tối thiểu vẫn là 3,0 s nên vẫn đúng ToU | `min_request_gap_s` trong `run_summary.json` ≥ 3,0 s |
-| 2 | **Khoá `work/run.lock`** (`src/crawler/worklock.py`), dùng `flock` trên Linux và `msvcrt` trên Windows | Hai `run_pipeline` trên cùng một `work/` (vd. một ca bị bật hai lần) sẽ gọi arXiv song song. Khoá gắn với file đang mở nên tự nhả khi process chết, không có khoá "chết" | `test_worklock.py`; `test_second_run_on_same_work_dir_is_refused`; `test_lock_is_released_when_a_run_stops_on_an_error` |
-| 3 | `semantic_scholar_limiter()` là **singleton** | Trước đây mỗi lần gọi tạo một limiter mới, nên hai luồng S2 có thể vượt 1 request/s | `test_semantic_scholar_limiter_is_shared` |
-| 4 | Ghi **file bị bỏ** vào `versions.jsonl`: trường `dropped` = `{đuôi file: {"files", "bytes"}}`; source không có TeX ghi theo loại, vd. `"(pdf)"` | Report cần giải thích kích thước trước/sau khi xoá hình. Đề chỉ cho giữ `.tex` và `.bib` [2], nên số liệu phải cho thấy phần bị bỏ là gì (hình, `.bbl`, `.sty`…) | `test_targz_keeps_tex_and_bib_only_and_figure_commands`, test end-to-end |
+| 1 | `ARXIV_JITTER_S` 0.5 → **0.1 s** (`config.py`) | The mean gap between request starts drops from 3.25 s to 3.05 s, about 6 % faster. The minimum gap stays 3.0 s, so the Terms of Use still hold | `min_request_gap_s` in `run_summary.json` ≥ 3.0 s |
+| 2 | **Lock on `work/run.lock`** (`src/crawler/worklock.py`), `flock` on Linux and `msvcrt` on Windows | Two `run_pipeline` processes on the same `work/` (a shift started twice) would call arXiv in parallel. The lock belongs to the open file, so the OS releases it when the process dies: no stale lock | `test_worklock.py`; `test_second_run_on_same_work_dir_is_refused`; `test_lock_is_released_when_a_run_stops_on_an_error` |
+| 3 | `semantic_scholar_limiter()` becomes a **singleton** | It used to build a new limiter on every call, so two S2 callers could exceed 1 request/s | `test_semantic_scholar_limiter_is_shared` |
+| 4 | **Dropped files** recorded in `versions.jsonl`: field `dropped` = `{extension: {"files", "bytes"}}`; a source without TeX is recorded by kind, e.g. `"(pdf)"` | The report explains the size before and after removing figures. The statement keeps only `.tex` and `.bib` [2], so the numbers must show what was removed (figures, `.bbl`, `.sty`…) | `test_targz_keeps_tex_and_bib_only_and_figure_commands`, end-to-end test |
 
-## Không làm: worker giải nén riêng
+## Rejected: a separate extraction worker
 
-Plan đề xuất tách giải nén sang một process thứ hai. Số đo trên 1.058 version chạy thử (19–20/10): thời gian giải nén **trung vị 19 ms, p90 66 ms, tối đa 0,57 s**, so với nhịp 3,05 s của làn arXiv. Giải nén chiếm chưa tới 1 % thời gian mỗi version, nên process thứ hai chỉ tốn thêm RAM (cũng là số liệu bị so sánh) và độ phức tạp, không làm crawl nhanh hơn. Phần chạy song song có lợi là Semantic Scholar (thread riêng, limiter riêng) và parser M2 (`multiprocessing` theo bài).
+The plan proposed moving extraction to a second process. Measured on 1,058 test versions (19–20/10): extraction takes **19 ms at the median, 66 ms at p90, 0.57 s at most**, against the 3.05 s pace of the arXiv lane. Extraction is under 1 % of the time per version, so a second process would only add RAM (also a compared metric) and complexity without speeding up the crawl. The parts worth running in parallel are Semantic Scholar (own thread, own limiter) and the M2 parser (`multiprocessing` per paper).
 
-## Ảnh hưởng
+## Impact
 
-- Không đổi schema `metadata.json`/`references.json`; `versions.jsonl` có thêm trường `dropped`.
-- Không đổi nhịp tối thiểu 3 s và vẫn chỉ một kết nối tới arXiv.
+- No change to the `metadata.json` / `references.json` schema; `versions.jsonl` gains the `dropped` field.
+- The 3-second minimum pace and the single arXiv connection are unchanged.
 
-## Nguồn đã xác minh
+## Verified sources
 
-1. arXiv.org. *Terms of Use for arXiv APIs*. https://info.arxiv.org/help/api/tou.html (đọc 21/10/2026).
-2. HCMUS CS TA. *Project Milestone 1 — Data Crawling*. https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/crawling (đọc 25/10/2026).
-3. Python 3.12 docs: `fcntl.flock`, `msvcrt.locking`. https://docs.python.org/3.12/library/fcntl.html, https://docs.python.org/3.12/library/msvcrt.html
+1. arXiv.org. *Terms of Use for arXiv APIs*. https://info.arxiv.org/help/api/tou.html (read 21/10/2026).
+2. HCMUS CS TA. *Project Milestone 1 — Data Crawling*. https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/crawling (read 25/10/2026).
+3. Python 3.12 documentation: `fcntl.flock`, `msvcrt.locking`. https://docs.python.org/3.12/library/fcntl.html, https://docs.python.org/3.12/library/msvcrt.html
