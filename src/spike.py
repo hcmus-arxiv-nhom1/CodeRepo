@@ -1,5 +1,5 @@
 # Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
-"""GĐ1 spike tools.
+"""Phase-1 spike tools (measure before the full crawl).
 
     python -m src.spike month-end 2606 --guess 32040   # last ID of a month, via the API
     python -m src.spike run --per-range 10              # crawl a sample, measure, estimate
@@ -225,7 +225,7 @@ def cmd_snapshot_coverage(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="GĐ1 spike tools")
+    parser = argparse.ArgumentParser(description="Phase-1 spike tools")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("month-end", help="find the last arXiv ID of a month")
     p.add_argument("yymm")
