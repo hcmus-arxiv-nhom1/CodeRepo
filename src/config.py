@@ -12,7 +12,7 @@ ARXIV_API_URL = ARXIV_EXPORT + "/api/query"
 ARXIV_OAI_URL = "https://oaipmh.arxiv.org/oai"
 ARXIV_API_BATCH = 100  # IDs per id_list request
 ARXIV_MIN_INTERVAL_S = 3.0  # Terms of Use: >= 3 s between calls, one connection.
-ARXIV_JITTER_S = 0.5
+ARXIV_JITTER_S = 0.1  # spec 0002: mean gap 3.05 s instead of 3.25 s (about 6% faster)
 
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1"
 SEMANTIC_SCHOLAR_API_KEY = os.environ.get("S2_API_KEY") or None
