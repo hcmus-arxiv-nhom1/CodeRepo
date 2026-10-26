@@ -16,6 +16,7 @@ The lecturer confirmed that what is graded is how efficient the crawling pipelin
 | 2 | **Lock on `work/run.lock`** (`src/crawler/worklock.py`), `flock` on Linux and `msvcrt` on Windows | Two `run_pipeline` processes on the same `work/` (a shift started twice) would call arXiv in parallel. The lock belongs to the open file, so the OS releases it when the process dies: no stale lock | `test_worklock.py`; `test_second_run_on_same_work_dir_is_refused`; `test_lock_is_released_when_a_run_stops_on_an_error` |
 | 3 | `semantic_scholar_limiter()` becomes a **singleton** | It used to build a new limiter on every call, so two S2 callers could exceed 1 request/s | `test_semantic_scholar_limiter_is_shared` |
 | 4 | **Dropped files** recorded in `versions.jsonl`: field `dropped` = `{extension: {"files", "bytes"}}`; a source without TeX is recorded by kind, e.g. `"(pdf)"` | The report explains the size before and after removing figures. The statement keeps only `.tex` and `.bib` [2], so the numbers must show what was removed (figures, `.bbl`, `.sty`…) | `test_targz_keeps_tex_and_bib_only_and_figure_commands`, end-to-end test |
+| 5 | **Per-version metadata** in `metadata.json`: field `versions` = `[{"version", "date", "title", "authors"}]`, from versioned API queries (`2606.30762v1`) in batches of 100 | The statement's suggested organisation keeps *"for each version, its paper metadata"*, and the resulted data is graded on how well it follows the suggested conventions. The metadata really changes between versions: on 100 multi-version test papers (27/10/2026) the v1 title differed from the latest for 14 papers, the authors for 12. Cost: about 15 extra requests per range of 5,000 IDs | `test_discover_resolves_versions_and_writes_metadata` |
 
 ## Rejected: a separate extraction worker
 
@@ -23,7 +24,7 @@ The plan proposed moving extraction to a second process. Measured on 1,058 test 
 
 ## Impact
 
-- No change to the `metadata.json` / `references.json` schema; `versions.jsonl` gains the `dropped` field.
+- `metadata.json` gains the `versions` list (paper-level fields unchanged, so the `papers` table is unaffected); `versions.jsonl` gains the `dropped` field; `references.json` is unchanged.
 - The 3-second minimum pace and the single arXiv connection are unchanged.
 
 ## Verified sources

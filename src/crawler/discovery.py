@@ -59,6 +59,9 @@ class PaperMetadata:
     num_versions: int
     categories: list[str] = field(default_factory=list)
     doi: str | None = None
+    # Per-version metadata (statement: "for each version, its paper metadata"):
+    # [{"version", "date", "title", "authors"}]; title/authors are null when unknown.
+    versions: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -303,27 +306,32 @@ def discover(
         if attempt == 1 and len(entries) < len(todo):
             log.warning("discovery: API missed %d IDs, retrying once", len(todo) - len(entries))
 
-    # 2. Dates of every version.
+    # 2. Date, title and authors of every version. A versioned ID (2606.30762v1) returns
+    #    the metadata of that version: on 100 multi-version papers (27/10/2026) the title of
+    #    v1 differed from the latest one for 14 papers and the authors for 12.
     dates: dict[str, dict[int, str]] = {}
+    per_version: dict[str, dict[int, ApiEntry]] = {}
     for arxiv_id, e in entries.items():
         d = {e.version: e.updated}
         d[1] = e.published  # v1-only papers: published is the authoritative v1 date
         snap_versions = snap.get(arxiv_id, {}).get("versions", {})
         for k in range(2, e.version):
             if k in snap_versions:
-                d[k] = snap_versions[k]
+                d[k] = snap_versions[k]  # fallback if the versioned query misses it
         dates[arxiv_id] = d
+        per_version[arxiv_id] = {e.version: e}
 
-    needed = [
-        f"{i}v{k}" for i, e in entries.items() for k in range(2, e.version) if k not in dates[i]
-    ]
+    needed = [f"{i}v{k}" for i, e in entries.items() for k in range(1, e.version)]
     for batch in _batches(needed, config.ARXIV_API_BATCH):
         try:
             for e in api_query(client, batch):
                 if e.arxiv_id in dates:
                     dates[e.arxiv_id][e.version] = e.updated
+                    per_version[e.arxiv_id][e.version] = e
         except (FetchError, etree.XMLSyntaxError) as exc:
             log.error("discovery: versioned API batch failed (%s)", exc)
+    for arxiv_id, e in entries.items():
+        dates[arxiv_id][1] = e.published  # keep v1 = published even after the v1 query
 
     # 3. OAI-PMH fallback: IDs the API missed and papers with incomplete version history.
     oai: dict[str, dict] = {}
@@ -388,6 +396,15 @@ def discover(
             num_versions=n,
             categories=cats,
             doi=doi,
+            versions=[
+                {
+                    "version": k,
+                    "date": versions[k],
+                    "title": pv.title if (pv := per_version.get(arxiv_id, {}).get(k)) else None,
+                    "authors": pv.authors if pv else None,
+                }
+                for k in range(1, n + 1)
+            ],
         )
         write_metadata(data_root, meta)
         result.missing.pop(arxiv_id, None)
