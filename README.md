@@ -1,6 +1,70 @@
-# CodeRepo
+# CodeRepo — Nhóm 1, arXiv Project (Nhập môn Khoa học Dữ liệu, HCMUS)
 
-<!-- Phần crawler/gather của README được soạn với sự hỗ trợ của AI assistant (Claude, Anthropic), ghi nguồn theo quy định môn học. -->
+<!-- README được soạn với sự hỗ trợ của AI assistant (Claude, Anthropic), ghi nguồn theo quy định môn học. -->
+
+> **Không đổi tên organization hay repo đến hết hạn poster:** link nộp Moodle sẽ chết.
+
+- **Book (link nộp Moodle):** <https://hcmus-arxiv-nhom1.github.io/arxiv-book/>
+- **Code repo:** <https://github.com/hcmus-arxiv-nhom1/CodeRepo>
+- **Đề bài:** <https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/>
+- Data contract: [`docs/data_contract.md`](docs/data_contract.md) · Spec: [`specs/`](specs/)
+
+## Môi trường
+
+- **Python 3.12**, trùng với runtime của Google Colab. Mọi package được pin trong `src/requirements.txt`; công cụ dev (pytest, ruff, pre-commit) nằm trong `src/requirements-dev.txt`.
+- Không cần GPU. Benchmark chính thức chạy trên **Google Colab CPU-only**.
+
+```bash
+# pip + venv
+python -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\activate
+pip install -r src/requirements.txt -r src/requirements-dev.txt
+pre-commit install                     # ruff, nbstripout, chặn file > 500 KB
+
+# hoặc uv
+uv venv .venv --python 3.12
+uv pip install -r src/requirements.txt -r src/requirements-dev.txt
+
+# kiểm tra
+ruff check . && ruff format --check . && pytest
+```
+
+### Secrets
+
+Không commit secrets. Trên Colab đặt trong **Secrets** (biểu tượng chìa khoá); trên máy dùng biến môi trường.
+
+| Biến | Dùng cho |
+| --- | --- |
+| `S2_API_KEY` | API key Semantic Scholar: nhịp 1,1 s thay vì 3 s, ít bị 429 |
+| `ARXIV_CONTACT_EMAIL` | Email nhóm, gắn vào User-Agent gửi tới arXiv |
+| `DATA_ROOT`, `WORK_DIR` | Thay mặc định `data/corpus` và `work` (tương đương `--data-root`, `--work-dir`) |
+
+## Chạy trên Google Colab
+
+| Notebook | Dùng khi |
+| --- | --- |
+| [`src/notebooks/colab_crawl.ipynb`](src/notebooks/colab_crawl.ipynb) | Crawl chính thức 4 dải bằng **một** instance, chia ca giữa các thành viên. Đồng bộ Google Drive sau mỗi 500 ID; dấu `SHIFT.json` trên Drive chặn hai ca chạy cùng lúc |
+| [`src/notebooks/colab_benchmark.ipynb`](src/notebooks/colab_benchmark.ipynb) | Benchmark M1 trên runtime mới, chỉ CPU: `/usr/bin/time -v` + profiler, in đủ số liệu hiệu năng và xuất CSV cho book |
+
+Mở bằng *File → Open notebook → GitHub*, dán link repo, chọn notebook, rồi **Run all**.
+
+## QA, thống kê và đo hiệu năng
+
+```bash
+# Kiểm tra toàn vẹn một dải theo data contract -> work/qa_report.csv (exit 1 nếu có lỗi)
+python -m src.qa.validate --range thien --data-root data/corpus --work-dir work
+
+# Đo RAM (tổng mọi process) và disk của cả lần chạy
+python -m src.utils.profiler --out work/profile --watch data/corpus --watch work -- \
+    python -m src.run_pipeline --range thien --no-progress
+
+# Xuất CSV thống kê cho book (thay CSV giả trong arxiv-book/data/m1)
+python -m src.analysis.stats --data-root data/corpus --work-dir work \
+    --profile-dir work/profile --out ../arxiv-book/data/m1
+
+# Crawl lại reference Semantic Scholar riêng (vd. bù sau khi có API key)
+python -m src.crawler.references --data-root data/corpus
+```
 
 ## Crawler (M1)
 
