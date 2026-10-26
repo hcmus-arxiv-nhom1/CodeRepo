@@ -1,47 +1,47 @@
 <!-- Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules. -->
-# Spec 0001 — Crawl reference metadata từ Semantic Scholar
+# Spec 0001 — Reference metadata from Semantic Scholar
 
-- **Owner:** Đăng (Member 4) · **Soạn hộ:** Thiên, 27/10/2026, để kịp crawl chính thức · **Reviewer:** Thiên, Tiến · **Trạng thái:** chờ Đăng duyệt
-- **Branch:** `feat/references` · Code: `src/crawler/references.py`, test: `src/tests/test_references.py`
+- **Owner:** Đăng (Member 4) · **Drafted by:** Thiên, 27/10/2026, to keep the official crawl on schedule · **Reviewers:** Thiên, Tiến · **Status:** awaiting Đăng's approval
+- **Branch:** `feat/references` · Code: `src/crawler/references.py`, tests: `src/tests/test_references.py`
 
-## Yêu cầu của đề
+## What the statement asks
 
 - *"The reference metadata must additionally be crawled for each publication via the Semantic Scholar API."*
-- Mỗi reference lưu *"its title, authors, submission date, arXiv ID when one exists, and Semantic Scholar ID"*; *"Keep all crawled references locally"*. Chỉ reference có `externalIds.ArXiv` mới vào bảng `references`.
-- Field xin theo dạng phẳng `references.title, references.authors, references.year, references.publicationDate, references.venue, references.externalIds` (đề ghi dạng lồng như `authors.name` bị từ chối).
-- Giới hạn: không key thì 1 request/s và 100 request/5 phút; có key thì ổn định 1 request/s.
+- For each reference: *"its title, authors, submission date, arXiv ID when one exists, and Semantic Scholar ID"*; *"Keep all crawled references locally"*. Only references with `externalIds.ArXiv` enter the `references` table.
+- Fields are requested flat: `references.title, references.authors, references.year, references.publicationDate, references.venue, references.externalIds` (nested forms such as `authors.name` are rejected).
+- Limits: without a key 1 request/s and 100 requests per 5 minutes; with a key a steady 1 request/s.
 
-## Spike (27/10/2026, không key)
+## Spike (27/10/2026, no API key)
 
-| Endpoint | Kết quả |
+| Endpoint | Result |
 | --- | --- |
-| `GET /paper/arXiv:{id}` | 429 ngay ở request đầu (pool chung đang quá tải) |
-| `POST /paper/batch` (5 ID) | 200. Mỗi phần tử là một bài kèm `references` đầy đủ: 218, 76, 0, 41 reference. ID không tồn tại trả `null` |
-| `GET /paper/{id}/references` | 200, phân trang bằng `offset`/`next`, mỗi phần tử là `{"citedPaper": {...}}` |
-| Chạy `references.py` trên 800 bài chạy thử | 700 bài trong 137 s với **18 request**; 100 bài còn bị 429 sau 5 lần thử và được để lại cho lần sau. 35,6 reference/bài, 49,9 % có arXiv ID, 13,5 % không resolve được (`paperId = null`), 9,5 % không có ngày |
+| `GET /paper/arXiv:{id}` | 429 on the very first request (shared pool overloaded) |
+| `POST /paper/batch` (5 IDs) | 200. Each element is one paper with its complete `references`: 218, 76, 0, 41 references; an unknown ID returns `null` |
+| `GET /paper/{id}/references` | 200, paginated with `offset`/`next`, each element is `{"citedPaper": {...}}` |
+| `references.py` on the 800 test papers | 800 papers with **21 requests** (one batch was retried in a later run after five 429s). 35.6 references per paper, 49.9 % with an arXiv ID, 13.5 % unresolved (`paperId = null`), 9.5 % without a date |
 
-## Thiết kế
+## Design
 
-1. **Một lô 100 ID mỗi request** qua `POST /paper/batch` (API cho tối đa 500). 20.000 bài ≈ 200 request, thay vì 20.000 request (≈ 6,7 giờ có key, ≈ 17 giờ không key) như plan cũ tính.
-2. **Bài có danh sách lồng đạt `NESTED_REFERENCE_CAP` (1.000)** được lấy lại đầy đủ qua `/paper/{id}/references` theo trang. Con số 1.000 là **giả định**, cần xác minh với API key (việc của Đăng). Trên 700 bài đo được, bài nhiều nhất có 202 reference.
-3. **Một limiter S2 dùng chung** (`semantic_scholar_limiter()`), tách khỏi limiter arXiv, nên chạy song song trong thread mà `run_pipeline` mở sẵn.
-4. **Retry** 429/5xx/lỗi kết nối tối đa 5 lần, backoff `2^n` s + jitter, ưu tiên `Retry-After`. Lô vẫn lỗi thì **không** ghi file; chạy lại sẽ thử tiếp. Bài đã có `references.json` với `status` `ok`/`not_found` thì bỏ qua.
-5. **Ghi nguyên tử** (file tạm rồi đổi tên). Schema: `docs/data_contract.md`, mục 4.
-6. Mỗi request ghi một dòng `S2 <METHOD> <url> -> <status>` vào log để `stats.py` đếm request và mã lỗi.
+1. **100 IDs per request** through `POST /paper/batch` (the API accepts up to 500). 20,000 papers ≈ 200 requests, instead of 20,000 requests (≈ 6.7 h with a key, ≈ 17 h without) in the earlier plan.
+2. **Papers whose nested list reaches `NESTED_REFERENCE_CAP` (1,000)** are completed through the paginated `/paper/{id}/references`. The value 1,000 is an **assumption** to verify with an API key (Đăng). The longest list among the 800 test papers has 202 references.
+3. **One shared S2 limiter** (`semantic_scholar_limiter()`), separate from the arXiv limiter, so it runs in parallel in the thread `run_pipeline` already starts.
+4. **Retries** on 429/5xx/connection errors, at most 5 attempts, `2^n` s backoff plus jitter, honouring `Retry-After`. A batch that still fails writes **no** file; the next run retries it. Papers whose `references.json` has `status` `ok` / `not_found` are skipped.
+5. **Atomic writes** (temporary file, then rename). Schema: `docs/data_contract.md`, section 4.
+6. Each request logs one line `S2 <METHOD> <url> -> <status>`, which `stats.py` counts.
 
-## Định nghĩa dùng trong report
+## Definitions used in the report
 
-- **Success rate reference metadata** = số bài `status == ok` / số bài đã crawl. Kèm tỉ lệ reference resolve được (`s2_id` khác `null`).
-- **Số reference trung bình mỗi bài** = trung bình `num_references` trên các bài `ok`.
+- **Reference metadata success rate** = papers with `status == ok` / papers crawled, plus the share of references S2 resolved (`s2_id` not null).
+- **Mean references per paper** = mean `num_references` over papers with `status == ok`.
 
-## Việc Đăng cần làm khi duyệt
+## To do when approving (Đăng)
 
-- [ ] Đăng ký và đặt `S2_API_KEY` (Colab Secrets). Không có key thì lô bị 429 liên tục ở giờ cao điểm.
-- [ ] Với key: xác minh trần của danh sách lồng trong batch (thử một bài có hơn 1.000 reference), sửa `NESTED_REFERENCE_CAP` nếu khác.
-- [ ] Duyệt định nghĩa success rate ở trên.
+- [ ] Register and set `S2_API_KEY` (Colab Secrets). Without a key the shared pool often answers 429.
+- [ ] With the key, check the cap of nested lists in batch answers (a paper with more than 1,000 references) and adjust `NESTED_REFERENCE_CAP` if needed.
+- [ ] Approve the success-rate definition above.
 
-## Nguồn đã xác minh
+## Verified sources
 
-1. HCMUS CS TA. *Project Milestone 1 — Data Crawling*. https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/crawling (đọc 25/10/2026).
-2. Allen Institute for AI. *Semantic Scholar Academic Graph API*. https://api.semanticscholar.org/api-docs/ — endpoint `paper/batch` và `paper/{paper_id}/references`.
-3. Spike và lần chạy trên 800 bài ở trên (27/10/2026).
+1. HCMUS CS TA. *Project Milestone 1 — Data Crawling*. https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/crawling (read 25/10/2026).
+2. Allen Institute for AI. *Semantic Scholar Academic Graph API*. https://api.semanticscholar.org/api-docs/ — endpoints `paper/batch` and `paper/{paper_id}/references`.
+3. The spike and the 800-paper run above (27/10/2026).
