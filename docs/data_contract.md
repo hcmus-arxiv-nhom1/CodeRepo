@@ -35,8 +35,9 @@ work/                             # --work-dir (WORK_DIR): bookkeeping, synced t
 | `num_versions` | int | Always `1 + len(revised_dates)` |
 | `categories` | list[string] | Extra, not part of the `papers` table |
 | `doi` | string \| null | Extra, not part of the `papers` table |
+| `versions` | list[object] | **Metadata of each version** (spec 0002, item 5): `{"version": int, "date": ISO string, "title": string \| null, "authors": list[string] \| null}`, one entry per version `1…num_versions`, in order |
 
-The statement suggests keeping metadata *"for each version"*. The group keeps it per paper because the `papers` table has one row per paper and the date of every version is already in `submission_date` + `revised_dates`.
+The paper-level fields describe the latest version and map to the `papers` table. `versions` follows the statement's suggestion to keep *"for each version, its paper metadata"*; the metadata does change between versions (on 100 multi-version test papers the v1 title differed for 14 and the authors for 12). `versions[k].date` always equals `submission_date` / `revised_dates[k-2]`. Semantic Scholar does not distinguish versions, so reference metadata stays per paper (section 4).
 
 ## 3. Version folders `vN/`
 
