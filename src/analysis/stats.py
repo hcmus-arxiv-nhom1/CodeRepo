@@ -35,6 +35,8 @@ from src.utils.ids import iter_id_range, to_folder_name
 PAPER_COLUMNS = [
     "arxiv_id",
     "range_owner",
+    "submission_date",
+    "n_authors",
     "n_versions",
     "n_versions_ok",
     "has_source",
@@ -82,11 +84,18 @@ def load_discovery(work_dirs: list[Path]) -> dict[str, dict]:
 def paper_row(arxiv_id: str, data_root: Path, state: dict) -> dict:
     folder = data_root / to_folder_name(arxiv_id)
     row = dict.fromkeys(PAPER_COLUMNS, 0)
-    row.update(arxiv_id=arxiv_id, range_owner=range_owner(arxiv_id) or "", ref_status="missing")
+    row.update(
+        arxiv_id=arxiv_id,
+        range_owner=range_owner(arxiv_id) or "",
+        ref_status="missing",
+        submission_date="",
+    )
     try:
         meta = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError):
         return row  # not discovered: counts as a failed paper
+    row["submission_date"] = meta.get("submission_date") or ""
+    row["n_authors"] = len(meta.get("authors") or [])
     n = meta.get("num_versions") or 0
     row["n_versions"] = n
     process = 0.0

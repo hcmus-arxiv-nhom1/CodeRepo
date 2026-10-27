@@ -94,9 +94,11 @@ def test_stats_export_matches_the_book_schema(tmp_path):
     assert (p["n_versions"], p["n_versions_ok"], p["has_source"]) == ("2", "2", "1")
     assert (p["size_before_bytes"], p["size_after_bytes"]) == ("2000", "200")
     assert (p["n_refs_total"], p["n_refs_arxiv"], p["n_refs_meta_ok"]) == ("2", "1", "1")
+    assert (p["submission_date"], p["n_authors"]) == ("2026-06-29T18:01:23Z", "1")
     assert p["range_owner"] == "thien" and float(p["process_sec"]) == 7.0
     assert papers["2606.30735"]["has_source"] == "0"  # PDF-only, still complete
     assert papers["2606.30736"]["ref_status"] == "missing"
+    assert papers["2606.30737"]["submission_date"] == ""
     assert papers["2606.30737"]["n_versions"] == "0"  # not on arXiv: not a success
 
     sources = {r["source"]: r for r in read_csv(out / "references_stats.csv")}
