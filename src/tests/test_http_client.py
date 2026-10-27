@@ -121,3 +121,64 @@ def test_connection_drop_mid_body_is_retried(tmp_path):
     dest = tmp_path / "y.src"
     assert client.get("https://export.arxiv.org/src/y", dest=dest).attempts == 2
     assert dest.read_bytes() == b"abcdef"
+
+
+def test_cut_body_resumes_with_a_range_request_and_no_backoff(tmp_path):
+    """arXiv /src/ answers Range with 206: only the missing bytes are fetched again."""
+    clock, starts = FakeClock(), []
+    body = b"0123456789"
+    cut = requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead")
+    responses = [
+        FakeResponse(200, body, headers={"Content-Length": "10"}, fail_midway=cut),
+        FakeResponse(206, body[5:], headers={"Content-Range": "bytes 5-9/10"}),
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    dest = tmp_path / "z.src"
+    res = client.get("https://export.arxiv.org/src/z", dest=dest)
+    assert res.status == 200 and res.attempts == 2 and res.nbytes == 10
+    assert dest.read_bytes() == body and not (tmp_path / "z.src.part").exists()
+    assert client.session.sent_headers[1]["Range"] == "bytes=5-"
+    assert starts == [0.0, 3.0]  # only the 3 s pace, no exponential backoff
+
+
+def test_resume_survives_several_cuts(tmp_path):
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [
+        FakeResponse(200, b"abcdefgh", headers={"Content-Length": "8"}, fail_midway=cut),
+        FakeResponse(206, b"efgh", headers={"Content-Range": "bytes 4-7/8"}, fail_midway=cut),
+        FakeResponse(206, b"gh", headers={"Content-Range": "bytes 6-7/8"}),
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    dest = tmp_path / "w.src"
+    assert client.get("https://export.arxiv.org/src/w", dest=dest).attempts == 3
+    assert dest.read_bytes() == b"abcdefgh"
+    assert [h.get("Range") for h in client.session.sent_headers] == [None, "bytes=4-", "bytes=6-"]
+
+
+def test_server_ignoring_range_restarts_from_zero(tmp_path):
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}, fail_midway=cut),
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}),  # Range ignored
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    dest = tmp_path / "v.src"
+    client.get("https://export.arxiv.org/src/v", dest=dest)
+    assert dest.read_bytes() == b"abcdef"  # not "abcabcdef"
+
+
+def test_wrong_content_range_discards_the_partial(tmp_path):
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}, fail_midway=cut),
+        FakeResponse(206, b"zz", headers={"Content-Range": "bytes 0-1/6"}),  # wrong start
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}),
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    dest = tmp_path / "u.src"
+    client.get("https://export.arxiv.org/src/u", dest=dest)
+    assert dest.read_bytes() == b"abcdef"
+    assert "Range" not in client.session.sent_headers[2]  # restarted from byte 0

@@ -6,7 +6,8 @@
   honouring ``Retry-After``; at most ``max_attempts`` attempts per URL;
 - 3 consecutive 403s trip a circuit breaker: pause 15-30 min and slow pacing to 5 s.
   Too many trips in one run raise ``BlockedError`` so the run stops instead of hammering.
-- downloads stream to ``<dest>.part`` and are renamed only once the body is complete.
+- downloads stream to ``<dest>.part`` and are renamed only once the body is complete; a
+  body cut mid-transfer is resumed with a Range request (no backoff, the 3 s pace only).
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -46,8 +48,8 @@ class BlockedError(FetchError):
     """arXiv keeps answering 403 even after circuit-breaker pauses: stop the run."""
 
 
-class _IncompleteBody(Exception):
-    pass
+class _CutBody(Exception):
+    """The body stopped mid-transfer; the bytes received so far stay in ``<dest>.part``."""
 
 
 # Network failures worth retrying. ChunkedEncodingError (connection dropped mid-body) is
@@ -57,8 +59,8 @@ _TRANSIENT_ERRORS = (
     requests.Timeout,
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ContentDecodingError,
-    _IncompleteBody,
 )
+_CONTENT_RANGE_RE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 
 
 @dataclass
@@ -124,23 +126,38 @@ class HttpClient:
         can decide; raises ``FetchError`` once retries are exhausted.
         """
         last_reason, last_status = "no attempt made", None
+        part = dest.with_name(dest.name + ".part") if dest is not None else None
         for attempt in range(1, self.max_attempts + 1):
             retry_after: str | None = None
+            # Resume a body cut mid-transfer: arXiv /src/ answers Range requests with 206
+            # (checked on 27/10/2026), so only the missing bytes are downloaded again.
+            offset = part.stat().st_size if part is not None and part.exists() else 0
+            req_headers = dict(headers or {})
+            if offset:
+                req_headers["Range"] = f"bytes={offset}-"
             try:
                 with self.limiter:
                     self.requests_sent += 1
                     gap = self.limiter.last_gap_s if self.limiter.calls > 1 else None
                     start = time.perf_counter()
                     resp = self.session.get(
-                        url, headers=headers, timeout=self.timeout, stream=dest is not None
+                        url,
+                        headers=req_headers or None,
+                        timeout=self.timeout,
+                        stream=dest is not None,
                     )
                     try:
                         status = resp.status_code
                         retry_after = resp.headers.get("Retry-After")
                         content, nbytes = None, 0
-                        if status == 200:
+                        if dest is not None and status == 206 and offset:
+                            nbytes = self._stream_to(resp, dest, offset=offset)
+                            status = 200  # the file is now complete
+                        elif dest is not None and status == 416 and offset:
+                            part.unlink(missing_ok=True)  # stale partial: start over
+                        elif status == 200:
                             if dest is not None:
-                                nbytes = self._stream_to(resp, dest)
+                                nbytes = self._stream_to(resp, dest)  # full body from byte 0
                             else:
                                 content = resp.content
                                 nbytes = len(content)
@@ -149,6 +166,12 @@ class HttpClient:
                         elapsed = time.perf_counter() - start
                     finally:
                         resp.close()
+            except _CutBody as exc:
+                # The server answered and then the transfer broke: not a rate limit, so no
+                # backoff; the limiter's 3-second pace is the only wait before resuming.
+                last_reason, last_status = f"cut mid-body: {exc}", None
+                log.warning("GET %s cut mid-body (%s), attempt %d", url, exc, attempt)
+                continue
             except _TRANSIENT_ERRORS as exc:
                 last_reason, last_status = f"{type(exc).__name__}: {exc}", None
                 log.warning("GET %s failed (%s), attempt %d", url, last_reason, attempt)
@@ -175,6 +198,9 @@ class HttpClient:
                     self._backoff(attempt, retry_after)
                 continue
             self._consecutive_403 = 0
+            if status == 416 and offset:
+                last_reason = "HTTP 416 on resume"
+                continue
             if status in RETRYABLE_STATUS:
                 last_reason = f"HTTP {status}"
                 self._backoff(attempt, retry_after)
@@ -191,24 +217,40 @@ class HttpClient:
             )
         raise FetchError(url, last_reason, last_status, self.max_attempts)
 
-    def _stream_to(self, resp: requests.Response, dest: Path) -> int:
+    def _stream_to(self, resp: requests.Response, dest: Path, offset: int = 0) -> int:
+        """Write the body to ``<dest>.part`` (appending after ``offset`` bytes for a 206),
+        rename it to ``dest`` once complete and return the file size.
+
+        A transfer cut mid-body raises ``_CutBody`` and keeps the partial file, so the
+        next attempt resumes with a Range request instead of downloading it all again.
+        """
         dest.parent.mkdir(parents=True, exist_ok=True)
         part = dest.with_name(dest.name + ".part")
-        nbytes = 0
+        encoded = resp.headers.get("Content-Encoding", "identity") != "identity"
+        if offset:
+            m = _CONTENT_RANGE_RE.match(resp.headers.get("Content-Range", ""))
+            if m is None or int(m.group(1)) != offset:
+                part.unlink(missing_ok=True)
+                raise _CutBody(f"unexpected Content-Range {resp.headers.get('Content-Range')!r}")
+            total: int | None = int(m.group(3))
+        else:
+            length = resp.headers.get("Content-Length")
+            total = int(length) if length is not None and not encoded else None
+        size = offset
         try:
-            with open(part, "wb") as fh:
+            with open(part, "ab" if offset else "wb") as fh:
                 for chunk in resp.iter_content(CHUNK_SIZE):
                     fh.write(chunk)
-                    nbytes += len(chunk)
-            expected = resp.headers.get("Content-Length")
-            encoded = resp.headers.get("Content-Encoding", "identity") != "identity"
-            if expected is not None and not encoded and int(expected) != nbytes:
-                raise _IncompleteBody(f"got {nbytes} of {expected} bytes")
-            os.replace(part, dest)
-        except BaseException:
+                    size += len(chunk)
+        except _TRANSIENT_ERRORS as exc:
+            raise _CutBody(f"{type(exc).__name__} after {size} of {total} bytes") from exc
+        if total is not None and size < total:
+            raise _CutBody(f"got {size} of {total} bytes")
+        if total is not None and size > total:
             part.unlink(missing_ok=True)
-            raise
-        return nbytes
+            raise _CutBody(f"got {size} bytes, more than the {total} announced")
+        os.replace(part, dest)
+        return size
 
     def _backoff(self, attempt: int, retry_after: str | None) -> None:
         delay = None

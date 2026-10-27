@@ -62,9 +62,11 @@ class FakeSession:
         self.handler = handler
         self.headers: dict[str, str] = {}
         self.calls: list[str] = []
+        self.sent_headers: list[dict] = []  # request headers of each call (Range checks)
 
     def get(self, url: str, headers=None, timeout=None, stream=False) -> FakeResponse:
         self.calls.append(url)
+        self.sent_headers.append(dict(headers or {}))
         return self.handler(url)
 
 
