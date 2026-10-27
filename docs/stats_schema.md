@@ -1,90 +1,94 @@
-<!-- Soạn với sự hỗ trợ của AI assistant (Claude, Anthropic), ghi nguồn theo quy định môn học. -->
-# Schema CSV thống kê cho book (M1)
+<!-- Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules. -->
+# Statistics CSV schema for the book (M1)
 
-`src/analysis/stats.py` gộp dữ liệu của 4 dải thành các CSV nhỏ dưới đây, đặt trong `data/` của book repo. Notebook EDA chỉ đọc các file này (không đọc corpus), nên build book không cần Colab hay Drive. Mọi bảng đều có cột `range_owner` ∈ {`thien`, `tien`, `hieu`, `dang`}, trùng khoá trong `config.RANGES`; dòng tổng hợp toàn corpus dùng `all`.
+> **Status:** proposal by Tiến (Member 2). `src/analysis/stats.py` currently writes the files of [data contract §7](data_contract.md) (`papers_stats.csv`, `references_stats.csv`, `benchmark_summary.csv`, `resource_timeseries.csv`); the two schemas still have to be reconciled.
 
-Quy ước: ngày ISO 8601 UTC; kích thước tính bằng byte; tỉ lệ là số thực trong [0, 1], làm tròn 4 chữ số; ô trống = không có dữ liệu (không dùng 0 để thay).
+`src/analysis/stats.py` merges the data of the 4 ranges into the small CSVs below, stored in `data/` of the book repo. The EDA notebook reads only these files (never the corpus), so building the book needs neither Colab nor Drive. Every table has a `range_owner` column ∈ {`thien`, `tien`, `hieu`, `dang`}, the same keys as `config.RANGES`; the whole-corpus row uses `all`.
 
-## 1. `m1_summary_by_range.csv` — 5 dòng (4 dải + `all`)
+Conventions: dates in ISO 8601 UTC; sizes in bytes; rates are floats in [0, 1], rounded to 4 digits; an empty cell = no data (never 0 as a stand-in).
 
-| Cột | Kiểu | Nguồn / cách tính | Thống kê bắt buộc (mục 1.2) |
+## 1. `m1_summary_by_range.csv` — 5 rows (4 ranges + `all`)
+
+| Column | Type | Source / computation | Required statistic (section 1.2) |
 | --- | --- | --- | --- |
-| `range_owner` | str | khoá dải | — |
-| `ids_requested` | int | số ID của dải (5.000) | — |
-| `papers_found` | int | ID có `metadata.json` hợp lệ | — |
-| `papers_complete` | int | bài mà mọi version ở trạng thái `ok`/`no_tex`/`unavailable` và có thư mục `vN/` | số bài crawl thành công |
+| `range_owner` | str | range key | — |
+| `ids_requested` | int | number of IDs in the range (5,000) | — |
+| `papers_found` | int | IDs with a valid `metadata.json` | — |
+| `papers_complete` | int | papers whose every version is `ok`/`no_tex`/`unavailable` and has a `vN/` folder | number of papers crawled successfully |
 | `paper_success_rate` | float | `papers_complete / ids_requested` | success rate |
-| `versions_total` | int | tổng `num_versions` | — |
-| `versions_ok`, `versions_no_tex`, `versions_unavailable`, `versions_failed` | int | `versions.jsonl` (bản ghi mới nhất mỗi version) | — |
+| `versions_total` | int | sum of `num_versions` | — |
+| `versions_ok`, `versions_no_tex`, `versions_unavailable`, `versions_failed` | int | `versions.jsonl` (latest record of each version) | — |
 | `avg_versions_per_paper` | float | `versions_total / papers_found` | — |
-| `avg_paper_bytes_before` | float | trung bình tổng `bytes_before` các version mỗi bài (chỉ bài complete) | kích thước TB trước khi xoá hình |
-| `avg_paper_bytes_after` | float | như trên với `bytes_after` | kích thước TB sau khi xoá hình |
-| `avg_refs_per_paper` | float | trung bình số reference (mọi reference) mỗi bài có `references.json` | số reference TB mỗi bài |
-| `avg_refs_with_arxiv_id` | float | như trên, chỉ reference có `ref_arxiv_id` | — |
-| `ref_success_rate` | float | bài có reference crawl xong / `papers_found` | success rate reference metadata |
+| `avg_paper_bytes_before` | float | mean over papers of the summed `bytes_before` of their versions (complete papers only) | average size before removing figures |
+| `avg_paper_bytes_after` | float | same with `bytes_after` | average size after removing figures |
+| `avg_refs_per_paper` | float | mean number of references (all of them) per paper with a `references.json` | average references per paper |
+| `avg_refs_with_arxiv_id` | float | same, only references with a `ref_arxiv_id` | — |
+| `ref_success_rate` | float | papers whose references were crawled / `papers_found` | reference metadata success rate |
 
-`all` cộng các cột đếm và tính lại các cột trung bình / tỉ lệ trên toàn corpus (không lấy trung bình của trung bình).
+`all` sums the count columns and recomputes the means / rates over the whole corpus (never a mean of means).
 
-## 2. `m1_papers.csv` — 1 dòng mỗi bài (tối đa 20.000 dòng)
+## 2. `m1_papers.csv` — 1 row per paper (at most 20,000 rows)
 
-Dùng cho phân phối, boxplot, ngoại lệ trong EDA.
+Used for distributions, box plots and outliers in the EDA.
 
-| Cột | Kiểu | Nguồn |
+| Column | Type | Source |
 | --- | --- | --- |
-| `range_owner`, `arxiv_id` | str | khoá |
+| `range_owner`, `arxiv_id` | str | keys |
 | `num_versions` | int | `metadata.json` |
 | `submission_date` | str | `metadata.json` |
-| `has_venue` | bool | `venue` khác null |
+| `has_venue` | bool | `venue` is not null |
 | `n_authors` | int | `len(authors)` |
 | `versions_ok`, `versions_no_tex`, `versions_unavailable`, `versions_failed` | int | `versions.jsonl` |
-| `complete` | bool | như `papers_complete` |
-| `n_tex_files`, `n_bib_files` | int | file giữ lại, mọi version |
-| `bytes_before`, `bytes_after` | int | tổng các version |
-| `dropped_bytes` | int | `bytes_before - bytes_after` (cần trường file bị bỏ của spec 0002) |
-| `n_refs`, `n_refs_with_arxiv_id` | int | `references.json`; trống nếu chưa crawl |
+| `complete` | bool | as for `papers_complete` |
+| `n_tex_files`, `n_bib_files` | int | files kept, all versions |
+| `bytes_before`, `bytes_after` | int | sum over the versions |
+| `dropped_bytes` | int | `bytes_before - bytes_after` (needs the dropped-files field of spec 0002) |
+| `n_refs`, `n_refs_with_arxiv_id` | int | `references.json`; empty if not crawled yet |
 | `refs_status` | str | `ok` / `missing` / `failed` |
-| `qa_errors` | int | số dòng `error` của bài trong `qa_report.csv` |
+| `qa_errors` | int | number of `error` rows of the paper in `qa_report.csv` |
 
-## 3. `m1_performance.csv` — 1 dòng mỗi lần chạy được báo cáo
+## 3. `m1_performance.csv` — 1 row per reported run
 
-Sinh từ `run_summary.json`, `runs.jsonl` và profiler. Chỉ lần chạy benchmark chính thức (`scope = benchmark`) mới được dùng làm số liệu hiệu năng trong report.
+Built from `run_summary.json`, `runs.jsonl` and the profiler. Only the official benchmark run (`scope = benchmark`) is used for the performance numbers of the report.
 
-| Cột | Kiểu | Nguồn | Thống kê bắt buộc |
+| Column | Type | Source | Required statistic |
 | --- | --- | --- | --- |
-| `run_id`, `scope` | str | nhãn chạy; `trial` / `crawl-shift` / `benchmark` | — |
-| `range_owner` | str | dải hoặc `all` | — |
-| `ids` | int | số ID chạy | — |
-| `wall_s` | float | `run_summary.wall_s`, end-to-end | thời gian chạy |
-| `discovery_s` | float | `run_summary.discovery_s` | tổng thời gian entry discovery |
-| `avg_paper_s` | float | `wall_s / ids` | thời gian TB mỗi bài |
-| `mean_version_s` | float | `run_summary.mean_version_s` | thời gian xử lý một bài/version |
-| `arxiv_requests`, `min_request_gap_s` | int, float | `run_summary` | chứng minh tuân thủ politeness |
-| `ram_peak_mb`, `ram_mean_mb` | float | profiler: tổng RSS process chính và mọi process con | RAM lớn nhất / trung bình |
-| `disk_peak_mb` | float | profiler: `data/` + `work/` | disk lớn nhất |
-| `output_bytes` | int | `du` của corpus cuối | dung lượng output |
-| `cpu_count`, `ram_total_gb` | int, float | `os.cpu_count()`, `psutil` | cấu hình testbed |
-| `time_v_max_rss_kb` | int | `/usr/bin/time -v`, dùng đối chiếu RAM | kiểm chứng được |
+| `run_id`, `scope` | str | run label; `trial` / `crawl-shift` / `benchmark` | — |
+| `range_owner` | str | range or `all` | — |
+| `ids` | int | number of IDs run | — |
+| `wall_s` | float | `run_summary.wall_s`, end to end | running time |
+| `discovery_s` | float | `run_summary.discovery_s` | total entry discovery time |
+| `avg_paper_s` | float | `wall_s / ids` | average time per paper |
+| `mean_version_s` | float | `run_summary.mean_version_s` | time to process one paper/version |
+| `arxiv_requests`, `min_request_gap_s` | int, float | `run_summary` | evidence of politeness compliance |
+| `ram_peak_mb`, `ram_mean_mb` | float | profiler: summed RSS of the main process and every child | peak / mean RAM |
+| `disk_peak_mb` | float | profiler: `data/` + `work/` | peak disk |
+| `output_bytes` | int | `du` of the final corpus | output size |
+| `cpu_count`, `ram_total_gb` | int, float | `os.cpu_count()`, `psutil` | testbed configuration |
+| `time_v_max_rss_kb` | int | `/usr/bin/time -v`, to cross-check RAM | verifiable |
 
-## 4. `m1_profiler_samples.csv` — chuỗi thời gian của lần benchmark
+## 4. `m1_profiler_samples.csv` — time series of the benchmark run
 
-| Cột | Kiểu | Ghi chú |
+| Column | Type | Note |
 | --- | --- | --- |
-| `run_id` | str | khoá tới `m1_performance.csv` |
-| `t_s` | float | giây kể từ lúc bắt đầu |
-| `rss_mb` | float | tổng RSS (process chính + process con) |
-| `data_bytes`, `work_bytes` | int | dung lượng hai thư mục tại thời điểm lấy mẫu |
+| `run_id` | str | key into `m1_performance.csv` |
+| `t_s` | float | seconds since the start |
+| `rss_mb` | float | summed RSS (main process + children) |
+| `data_bytes`, `work_bytes` | int | size of the two folders at sampling time |
 
-## 5. Ràng buộc kiểm tra tự động
+## 5. Automatic checks
 
-- Mỗi `range_owner` trong `m1_papers.csv` có ≤ 5.000 dòng; tổng bằng `papers_found` của `all`.
-- `paper_success_rate = papers_complete / ids_requested` khớp giữa bảng 1 và bảng 2.
-- `bytes_after <= bytes_before` ở mọi dòng.
-- `avg_paper_bytes_*` trong bảng 1 khớp trung bình tính lại từ bảng 2.
-- `ram_peak_mb >= ram_mean_mb`; `ram_peak_mb` lệch `time_v_max_rss_kb` không quá một ngưỡng đã ghi trong report.
-- Số liệu trong report lấy từ các CSV này qua code cell, không gõ tay.
+- Each `range_owner` in `m1_papers.csv` has ≤ 5,000 rows; the total equals `papers_found` of `all`.
+- `paper_success_rate = papers_complete / ids_requested` agrees between tables 1 and 2.
+- `bytes_after <= bytes_before` on every row.
+- `avg_paper_bytes_*` in table 1 matches the mean recomputed from table 2.
+- `ram_peak_mb >= ram_mean_mb`; `ram_peak_mb` differs from `time_v_max_rss_kb` by no more than a threshold stated in the report.
+- Numbers in the report come from these CSVs through code cells, never typed by hand.
 
-## 6. Việc còn phụ thuộc nhóm khác
+## 6. Dependencies on other members
 
-- Định dạng `references.json` (cột `n_refs`, `ref_success_rate`): chờ spec 0001 của Đăng.
-- `dropped_bytes`, `n_tex_files`, `n_bib_files`: chờ trường file bị bỏ trong `versions.jsonl` (spec 0002 của Thiên).
-- `ram_*`, `disk_peak_mb`, `m1_profiler_samples.csv`: chờ `src/utils/profiler.py` của Hiếu.
+All three were resolved when PRs #11–#13 were merged (27/10/2026):
+
+- `references.json` format (`n_refs`, `ref_success_rate`): spec 0001 (Đăng).
+- `dropped_bytes`, `n_tex_files`, `n_bib_files`: dropped-files field in `versions.jsonl` (spec 0002, Thiên).
+- `ram_*`, `disk_peak_mb`, `m1_profiler_samples.csv`: `src/utils/profiler.py` (Hiếu).
