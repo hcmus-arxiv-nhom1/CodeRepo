@@ -53,7 +53,8 @@ The paper-level fields describe the latest version and map to the `papers` table
 | `archive_bytes` | Size of the downloaded file |
 | `bytes_before` / `bytes_after` | Uncompressed size of every file / of the kept files |
 | `dropped` | `{extension: {"files", "bytes"}}` left out by the whitelist (spec 0002) |
-| `download_s`, `extract_s`, `total_s`, `attempts`, `finished_at` | Timings and attempts |
+| `archive_bytes` vs `received_bytes` | Size of the source (Content-Length) vs bytes actually downloaded: smaller for PDF/HTML-only sources, whose download stops after the first bytes (spec 0002, item 8) |
+| `download_s`, `total_s`, `attempts`, `resumes`, `finished_at` | Timings (download and extraction overlap, the archive is unpacked while it arrives), attempts and Range resumes |
 
 ## 4. `references.json` (one per paper)
 
