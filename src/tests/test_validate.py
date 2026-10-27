@@ -84,9 +84,14 @@ def test_binary_and_foreign_files_are_caught(tmp_path):
     folder = make_paper(tmp_path)
     (folder / "v1" / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (folder / "v2" / "evil.tex").write_bytes(b"\\input{a}\x00\x01")
-    (folder / "v2" / "link.tex").symlink_to(folder / "v2" / "main.tex")
+    expected = 2
+    try:
+        (folder / "v2" / "link.tex").symlink_to(folder / "v2" / "main.tex")
+        expected += 1
+    except OSError:  # Windows without the symlink privilege
+        pass
     found = validate_paper(ID, tmp_path, owner="tien")
-    assert [i.check for i in found].count("binary_file") == 3
+    assert [i.check for i in found].count("binary_file") == expected
 
 
 def test_empty_tex_is_only_a_warning(tmp_path):
