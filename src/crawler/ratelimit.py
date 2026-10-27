@@ -72,6 +72,11 @@ class RateLimiter:
         self.calls += 1
         self._next_start = now + self.min_interval_s + self._rng() * self.jitter_s
 
+    def hold(self) -> threading.RLock:
+        """The lock alone, without taking a turn: keeps one connection across a body that
+        needs several requests (Range resumes), each of which still waits its turn."""
+        return self._lock
+
     def pause_for(self, seconds: float) -> None:
         """Delay the next call by at least ``seconds`` from now (backoff, circuit breaker)."""
         with self._lock:

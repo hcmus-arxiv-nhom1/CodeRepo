@@ -181,3 +181,15 @@ def test_missing_source_is_an_empty_record(tmp_path):
     assert summary["version_status"]["unavailable"] == 1
     assert list((tmp_path / "corpus" / "2606-00001" / "v1").iterdir()) == []
     assert summary["papers_complete"] == 3
+
+
+def test_pdf_only_source_is_not_downloaded_to_the_end(tmp_path):
+    """The type is known from the first bytes: the rest of a PDF is never fetched."""
+    pdf = b"%PDF-1.5\n" + PNG * 50  # about 51 KB, served in two chunks
+    fake = FakeArxiv(src_body={"2606.00003v1": (pdf, "arXiv-2606.00003v1.pdf")})
+    crawl(tmp_path, fake)
+    rec = load_version_state(tmp_path / "work" / "versions.jsonl")[("2606.00003", 1)]
+    assert rec["status"] == "no_tex" and rec["kind"] == "pdf"
+    assert rec["archive_bytes"] == len(pdf)  # size from Content-Length, for the statistics
+    assert rec["received_bytes"] < len(pdf)  # but only the first chunk was read
+    assert not (tmp_path / "work" / "tmp").exists()  # no archive ever stored
