@@ -114,6 +114,7 @@ M2 (agreed now): a version without TeX must still be recorded as empty (*"record
 | Column | Definition |
 | --- | --- |
 | `arxiv_id`, `range_owner` | ID and owner of its range (`config.RANGES`) |
+| `submission_date`, `n_authors` | v1 date and `len(authors)` from `metadata.json` (empty / 0 when not discovered) |
 | `n_versions` | `num_versions` (0 when discovery did not find the paper) |
 | `n_versions_ok` | Versions whose final status is `ok`, `no_tex` or `unavailable` **and** whose `vN/` exists |
 | `has_source` | 1 when at least one version is `ok` |
@@ -129,5 +130,7 @@ M2 (agreed now): a version without TeX must still be recorded as empty (*"record
 **`references_stats.csv`** — one row per source (`arxiv`, `semantic_scholar`): `source, n_requests, n_hit, n_miss, n_http_429, n_http_5xx`. Requests and HTTP codes are counted in `work/run.log`; `n_hit` / `n_miss` are papers found / not found (`discovery.jsonl` for arXiv, `references.json` for S2).
 
 **`benchmark_summary.csv`** — `metric, value, unit, tool` for `wall_time_e2e`, `discovery_time`, `avg_paper_time`, `ram_max`, `ram_mean`, `disk_max`, `output_size` (plus `/usr/bin/time -v` cross-checks), aggregated as in section 5.
+
+Per-range summaries (success rate, mean sizes, mean references) are not a separate file: the notebook computes them with `groupby("range_owner")` on `papers_stats.csv`, so the two can never disagree. The testbed (`cpu_count`, `ram_total_mb`, `platform`) is in each chunk's `profile_summary.json`.
 
 **`resource_timeseries.csv`** — `t_sec, rss_total_mb, disk_mb`, the profiler samples of every chunk placed end to end.
