@@ -4,6 +4,7 @@ import json
 
 from src.qa.validate import (
     check_metadata,
+    load_not_found,
     load_versions_log,
     main,
     validate_paper,
@@ -126,7 +127,8 @@ def test_references_json(tmp_path):
     ]
     (folder / "references.json").write_text("[1, 2")
     assert checks(validate_paper(ID, tmp_path, owner="t")) == ["references_schema"]
-    (folder / "references.json").write_text("[]")
+    ok = {"status": "ok", "num_references": 0, "num_arxiv_references": 0, "references": []}
+    (folder / "references.json").write_text(json.dumps(ok))  # spec 0001 shape
     assert validate_paper(ID, tmp_path, owner="t", require_references=True) == []
 
 
@@ -165,3 +167,41 @@ def test_cli_writes_report_and_exit_code(tmp_path, capsys):
     }
     assert rows[0]["range_owner"] == "custom"
     assert json.loads(capsys.readouterr().out)["papers_with_errors"] == 2
+
+
+def test_references_follow_spec_0001(tmp_path):
+    folder = make_paper(tmp_path)
+    ref = {"s2_id": "x", "title": "T", "authors": ["A"], "submission_date": "2020", "arxiv_id": "1"}
+    rec = {"status": "ok", "num_references": 2, "num_arxiv_references": 1, "references": [ref]}
+    (folder / "references.json").write_text(json.dumps(rec))
+    found = [i.detail for i in validate_paper(ID, tmp_path, owner="t")]
+    assert found == ["num_references != len(references)"]
+    rec |= {"num_references": 1, "references": [{"title": "no other field"}]}
+    (folder / "references.json").write_text(json.dumps(rec))
+    details = [i.detail for i in validate_paper(ID, tmp_path, owner="t")]
+    assert any("miss one of" in d for d in details)
+
+
+def test_per_version_metadata_is_checked():
+    dates = [meta()["submission_date"], *meta()["revised_dates"]]
+    good = [
+        {"version": k, "date": d, "title": "T", "authors": ["A"]} for k, d in enumerate(dates, 1)
+    ]
+    assert check_metadata(meta(versions=good), ID) == []
+    assert check_metadata(meta(), ID) == []  # metadata written before the field existed
+    bad = [dict(v) for v in good]
+    bad[0]["date"] = "2020-01-01T00:00:00Z"
+    assert check_metadata(meta(versions=bad), ID)
+    assert check_metadata(meta(versions=good[:1]), ID)  # one entry missing
+
+
+def test_id_unknown_to_arxiv_is_only_a_warning(tmp_path):
+    found = validate_paper(ID, tmp_path, owner="t", not_on_arxiv=frozenset({ID}))
+    assert [(i.check, i.severity) for i in found] == [("not_on_arxiv", "warning")]
+    log = tmp_path / "discovery.jsonl"
+    records = [
+        {"arxiv_id": ID, "status": "missing", "reason": "not_found"},
+        {"arxiv_id": "2606.25735", "status": "found"},
+    ]
+    log.write_text("".join(json.dumps(r) + "\n" for r in records))
+    assert load_not_found(log) == frozenset({ID})

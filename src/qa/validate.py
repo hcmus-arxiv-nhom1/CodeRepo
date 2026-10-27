@@ -19,11 +19,13 @@ Checks, per paper of the selected range (one row per problem in ``qa_report.csv`
     status_missing     (needs versions.jsonl) no record for a version
     status_failed      (needs versions.jsonl) latest record is ``failed``
     status_mismatch    ``ok`` without any .tex file, or ``no_tex`` / ``unavailable`` with files
-    references_schema  references.json exists but is not valid JSON
+    references_schema  references.json is not valid JSON, or breaks spec 0001 (status,
+                       counts, fields of each reference)
     references_missing (only with --require-references) no references.json
+    not_on_arxiv       (warning) folder missing because discovery found no such ID
 
-Severity is ``error`` for everything above, except ``tex_empty`` (a .tex file of 0 bytes),
-which is a ``warning``. Exit code 1 when any error is found.
+Severity is ``error`` for everything above, except ``tex_empty`` (a .tex file of 0 bytes)
+and ``not_on_arxiv``, which are warnings. Exit code 1 when any error is found.
 """
 
 from __future__ import annotations
@@ -102,6 +104,48 @@ def check_metadata(meta: object, folder_id: str) -> list[str]:
         problems.append(f"num_versions must be an int >= 1, got {n!r}")
     elif _is_str_list(revised) and n != 1 + len(revised):
         problems.append(f"num_versions={n} but {len(revised)} revised_dates")
+    elif "versions" in meta:  # per-version metadata (spec 0002, item 5)
+        problems += _check_version_list(meta["versions"], [meta["submission_date"], *revised])
+    return problems
+
+
+def _check_version_list(versions: object, dates: list[str]) -> list[str]:
+    """``versions`` = one {"version", "date", "title", "authors"} per version, in order."""
+    numbers = [v.get("version") if isinstance(v, dict) else None for v in versions or []]
+    if not isinstance(versions, list) or numbers != list(range(1, len(dates) + 1)):
+        return ["versions must hold one entry per version 1..num_versions, in order"]
+    problems = []
+    for v, date in zip(versions, dates, strict=True):
+        if v.get("date") != date:
+            problems.append(f"versions[v{v['version']}].date differs from the dates list")
+        if v.get("title") is not None and not isinstance(v["title"], str):
+            problems.append(f"versions[v{v['version']}].title must be a string or null")
+        if v.get("authors") is not None and not _is_str_list(v["authors"]):
+            problems.append(f"versions[v{v['version']}].authors must be a list of strings")
+    return problems
+
+
+REF_FIELDS = ("s2_id", "title", "authors", "submission_date", "arxiv_id")
+
+
+def check_references(rec: object) -> list[str]:
+    """Problems of one references.json against spec 0001 (data contract, section 4)."""
+    if not isinstance(rec, dict):
+        return ["not a JSON object"]
+    if rec.get("status") not in ("ok", "not_found"):
+        return [f"status must be ok or not_found, got {rec.get('status')!r}"]
+    refs = rec.get("references")
+    if not isinstance(refs, list):
+        return ["references must be a list"]
+    problems = []
+    bad = sum(1 for r in refs if not isinstance(r, dict) or not set(REF_FIELDS) <= set(r))
+    if bad:
+        problems.append(f"{bad} reference(s) miss one of {', '.join(REF_FIELDS)}")
+    if rec.get("num_references") != len(refs):
+        problems.append("num_references != len(references)")
+    with_arxiv = sum(1 for r in refs if isinstance(r, dict) and r.get("arxiv_id"))
+    if rec.get("num_arxiv_references") != with_arxiv:
+        problems.append("num_arxiv_references != references with an arxiv_id")
     return problems
 
 
@@ -149,8 +193,13 @@ def validate_paper(
     owner: str,
     versions_log: dict[tuple[str, int], dict] | None = None,
     require_references: bool = False,
+    not_on_arxiv: frozenset[str] = frozenset(),
 ) -> list[Issue]:
-    """All problems of one paper folder."""
+    """All problems of one paper folder.
+
+    ``not_on_arxiv``: IDs discovery reported as non-existent (discovery.jsonl); their
+    missing folder is expected, so it is a warning instead of an error.
+    """
     issues: list[Issue] = []
 
     def add(version: int | str, check: str, detail: str, severity: str = "error") -> None:
@@ -158,7 +207,10 @@ def validate_paper(
 
     folder = data_root / to_folder_name(arxiv_id)
     if not folder.is_dir():
-        add("", "missing_dir", f"{folder.name}/ not found")
+        if arxiv_id in not_on_arxiv:
+            add("", "not_on_arxiv", "discovery found no such arXiv ID", "warning")
+        else:
+            add("", "missing_dir", f"{folder.name}/ not found")
         return issues
 
     # metadata.json
@@ -224,12 +276,33 @@ def validate_paper(
     ref_path = folder / "references.json"
     if ref_path.is_file():
         try:
-            json.loads(ref_path.read_text(encoding="utf-8"))
+            refs = json.loads(ref_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             add("", "references_schema", f"invalid JSON: {exc}")
+        else:
+            for problem in check_references(refs):
+                add("", "references_schema", problem)
     elif require_references:
         add("", "references_missing", "references.json not found")
     return issues
+
+
+def load_not_found(path: Path) -> frozenset[str]:
+    """IDs whose latest discovery.jsonl record is ``missing`` with reason ``not_found``."""
+    latest: dict[str, dict] = {}
+    if path.is_file():
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                    latest[rec["arxiv_id"]] = rec
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    return frozenset(
+        i
+        for i, r in latest.items()
+        if r.get("status") == "missing" and r.get("reason") == "not_found"
+    )
 
 
 def unexpected_folders(data_root: Path, expected: set[str]) -> Iterator[str]:
@@ -250,6 +323,7 @@ def validate_range(
     versions_log: dict[tuple[str, int], dict] | None = None,
     require_references: bool = False,
     scan_extra: bool = False,
+    not_on_arxiv: frozenset[str] = frozenset(),
 ) -> tuple[list[Issue], int]:
     """Validate every ID; return (issues, number of IDs checked)."""
     ids = list(ids)
@@ -262,6 +336,7 @@ def validate_range(
                 owner=owner,
                 versions_log=versions_log,
                 require_references=require_references,
+                not_on_arxiv=not_on_arxiv,
             )
         )
     if scan_extra:
@@ -336,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
         versions_log=versions_log,
         require_references=args.require_references,
         scan_extra=args.scan_extra,
+        not_on_arxiv=load_not_found(args.work_dir / "discovery.jsonl"),
     )
     out = args.out or args.work_dir / "qa_report.csv"
     write_report(out, issues)
