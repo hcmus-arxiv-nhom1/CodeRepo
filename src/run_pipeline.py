@@ -17,7 +17,8 @@ Outputs:
 
 Re-running the same command skips every version whose latest record is ok / no_tex /
 unavailable and whose vN/ folder exists, so a killed run resumes where it stopped and
-failed versions are retried.
+failed versions are retried. Only one run at a time may use a work directory
+(``<work-dir>/run.lock``), so arXiv never sees two connections from one machine.
 
 Reference metadata (Semantic Scholar) is crawled in a background thread when
 ``src/crawler/references.py`` provides ``crawl(arxiv_ids: list[str], data_root: Path)``:
@@ -47,9 +48,9 @@ from tqdm import tqdm
 from src import config
 from src.crawler.discovery import discover
 from src.crawler.downloader import download_version
-from src.crawler.extract import CorruptArchiveError, extract_version
 from src.crawler.http_client import HttpClient
 from src.crawler.ratelimit import get_arxiv_limiter
+from src.crawler.worklock import WorkDirLock, WorkDirLockedError
 from src.utils.ids import iter_id_range, to_folder_name
 
 log = logging.getLogger("src.run_pipeline")
@@ -110,29 +111,31 @@ def process_version(
     version: int,
     *,
     data_root: Path,
-    tmp_dir: Path,
     keep_extensions: frozenset[str],
     archive_dir: Path | None = None,
 ) -> dict:
-    """Download + extract one version and return its versions.jsonl record."""
+    """Download + extract one version (streamed, no archive on disk) -> versions.jsonl record."""
     start = time.perf_counter()
     vdir = version_dir(data_root, arxiv_id, version)
     rec: dict = {"arxiv_id": arxiv_id, "version": version}
     reason = None
     for _ in range(MAX_DOWNLOADS_PER_VERSION):
-        dl = download_version(client, arxiv_id, version, tmp_dir)
+        dl = download_version(client, arxiv_id, version, vdir, keep_extensions, archive_dir)
         rec.update(
             http_status=dl.http_status,
             content_type=dl.content_type,
             archive_name=dl.filename,
-            download_s=round(dl.elapsed_s, 3),
+            download_s=round(dl.elapsed_s, 3),  # download and extraction overlap
+            received_bytes=dl.nbytes,
             attempts=dl.attempts,
+            resumes=dl.resumes,
         )
         if dl.status == "unavailable":
             shutil.rmtree(vdir, ignore_errors=True)
             vdir.mkdir(parents=True)  # empty record
             return {**rec, "status": "unavailable", "reason": dl.reason, "total_s": _since(start)}
         if dl.status == "failed":
+            shutil.rmtree(vdir, ignore_errors=True)  # no half-written version left behind
             return {
                 **rec,
                 "status": "failed",
@@ -140,21 +143,12 @@ def process_version(
                 "reason": dl.reason,
                 "total_s": _since(start),
             }
-
-        t_extract = time.perf_counter()
-        try:
-            res = extract_version(dl.path, vdir, keep_extensions, dl.filename)
-        except CorruptArchiveError as exc:
-            reason = str(exc)
+        if dl.status == "corrupt":
+            reason = dl.reason
             log.warning("%sv%d: corrupt archive (%s), downloading again", arxiv_id, version, reason)
-            dl.path.unlink(missing_ok=True)
             continue
-        if archive_dir is not None:  # keep the raw response (fixtures for the spike)
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            os.replace(dl.path, archive_dir / Path(dl.filename or dl.path.name).name)
-        else:
-            dl.path.unlink(missing_ok=True)
 
+        res = dl.extract
         rec.update(
             kind=res.kind,
             files=res.files,
@@ -162,7 +156,7 @@ def process_version(
             bytes_before=res.bytes_before,
             bytes_after=res.bytes_after,
             skipped_unsafe=res.skipped_unsafe,
-            extract_s=_since(t_extract),
+            dropped=res.dropped,
         )
         if res.kind in SUSPICIOUS_KINDS:
             shutil.rmtree(vdir, ignore_errors=True)
@@ -293,7 +287,8 @@ def run(
     """Discover ``ids``, then download and extract every version not done yet."""
     data_root.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
-    tmp_dir = work_dir / "tmp"
+    lock = WorkDirLock(work_dir)
+    lock.acquire()  # raises WorkDirLockedError if another run uses this work_dir
     archive_dir = work_dir / "archives" if keep_archives else None
     client = client or HttpClient(get_arxiv_limiter(), config.USER_AGENT)
 
@@ -343,7 +338,6 @@ def run(
                 arxiv_id,
                 version,
                 data_root=data_root,
-                tmp_dir=tmp_dir,
                 keep_extensions=keep_extensions,
                 archive_dir=archive_dir,
             )
@@ -374,7 +368,7 @@ def run(
     finally:
         disc_log.close()
         ver_log.close()
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(work_dir / "tmp", ignore_errors=True)  # left by versions before 27/10
         wall_s = time.perf_counter() - t0
         summary = {
             "label": label,
@@ -409,6 +403,7 @@ def run(
         (work_dir / "run_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         with open(work_dir / "runs.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps(summary) + "\n")
+        lock.release()
     return summary
 
 
@@ -526,6 +521,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted: re-run the same command to resume", file=sys.stderr)
         return 130
+    except WorkDirLockedError as exc:
+        print(f"not started: {exc}", file=sys.stderr)
+        return 2
     print(
         json.dumps(
             {

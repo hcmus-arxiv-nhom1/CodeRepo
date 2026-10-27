@@ -97,27 +97,84 @@ def test_blocked_error_when_403_persists():
         client.get("https://export.arxiv.org/y")
 
 
-def test_stream_to_file_retries_truncated_body(tmp_path):
+def read_all(body, headers):
+    return body.read()
+
+
+def test_body_ended_early_is_resumed_with_range(tmp_path):
     clock, starts = FakeClock(), []
     body = b"0123456789"
     responses = [
         FakeResponse(200, body[:5], headers={"Content-Length": "10"}),  # connection cut short
-        FakeResponse(200, body, headers={"Content-Length": "10"}),
+        FakeResponse(206, body[5:], headers={"Content-Range": "bytes 5-9/10"}),
     ]
     client = make_client(scripted(responses, clock, starts), clock)
-    dest = tmp_path / "x.src"
-    res = client.get("https://export.arxiv.org/src/x", dest=dest)
-    assert res.attempts == 2 and dest.read_bytes() == body
-    assert not (tmp_path / "x.src.part").exists()
+    res = client.stream("https://export.arxiv.org/src/x", read_all)
+    assert res.value == body and res.attempts == 1 and res.resumes == 1 and res.nbytes == 10
+    assert client.session.sent_headers[1]["Range"] == "bytes=5-"
 
 
-def test_connection_drop_mid_body_is_retried(tmp_path):
+def test_cut_body_resumes_with_a_range_request_and_no_backoff():
+    """arXiv /src/ answers Range with 206: only the missing bytes are fetched again."""
     clock, starts = FakeClock(), []
+    body = b"0123456789"
+    cut = requests.exceptions.ChunkedEncodingError("Connection broken: IncompleteRead")
     responses = [
-        FakeResponse(200, b"abcdef", fail_midway=requests.exceptions.ChunkedEncodingError("cut")),
-        FakeResponse(200, b"abcdef"),
+        FakeResponse(200, body, headers={"Content-Length": "10"}, fail_midway=cut),
+        FakeResponse(206, body[5:], headers={"Content-Range": "bytes 5-9/10"}),
     ]
     client = make_client(scripted(responses, clock, starts), clock)
-    dest = tmp_path / "y.src"
-    assert client.get("https://export.arxiv.org/src/y", dest=dest).attempts == 2
-    assert dest.read_bytes() == b"abcdef"
+    res = client.stream("https://export.arxiv.org/src/z", read_all)
+    assert res.status == 200 and res.value == body and res.resumes == 1
+    assert starts == [0.0, 3.0]  # only the 3 s pace, no exponential backoff
+
+
+def test_resume_survives_several_cuts():
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [
+        FakeResponse(200, b"abcdefgh", headers={"Content-Length": "8"}, fail_midway=cut),
+        FakeResponse(206, b"efgh", headers={"Content-Range": "bytes 4-7/8"}, fail_midway=cut),
+        FakeResponse(206, b"gh", headers={"Content-Range": "bytes 6-7/8"}),
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    res = client.stream("https://export.arxiv.org/src/w", read_all)
+    assert res.value == b"abcdefgh" and res.resumes == 2
+    assert [h.get("Range") for h in client.session.sent_headers] == [None, "bytes=4-", "bytes=6-"]
+
+
+def test_server_ignoring_range_restarts_from_zero():
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}, fail_midway=cut),
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}),  # Range ignored
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}),
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    res = client.stream("https://export.arxiv.org/src/v", read_all)
+    assert res.value == b"abcdef" and res.attempts == 2  # not "abcabcdef"
+    assert "Range" not in client.session.sent_headers[2]
+
+
+def test_wrong_content_range_restarts_from_zero():
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}, fail_midway=cut),
+        FakeResponse(206, b"zz", headers={"Content-Range": "bytes 0-1/6"}),  # wrong start
+        FakeResponse(200, b"abcdef", headers={"Content-Length": "6"}),
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    assert client.stream("https://export.arxiv.org/src/u", read_all).value == b"abcdef"
+
+
+def test_consumer_errors_propagate():
+    clock, starts = FakeClock(), []
+    client = make_client(scripted([FakeResponse(200, b"x")], clock, starts), clock)
+
+    def broken(body, headers):
+        raise ValueError("corrupt archive")
+
+    with pytest.raises(ValueError):
+        client.stream("https://export.arxiv.org/src/t", broken)

@@ -38,6 +38,12 @@ def test_targz_keeps_tex_and_bib_only_and_figure_commands(tmp_path):
     assert res.bytes_before == sum(len(d) for d in files.values())
     assert res.bytes_after == len(MAIN_TEX) + len(INTRO) + len(BIB)
     assert res.archive_bytes == archive.stat().st_size
+    # what the whitelist left out, for the M1 report
+    assert res.dropped == {
+        ".bbl": {"files": 1, "bytes": len(files["refs.bbl"])},
+        ".png": {"files": 1, "bytes": len(PNG)},
+        ".sty": {"files": 1, "bytes": len(files["style.sty"])},
+    }
 
 
 def test_keep_extensions_can_include_bbl(tmp_path):
@@ -85,6 +91,7 @@ def test_pdf_only_version_is_an_empty_record(tmp_path):
     assert res.kind == "pdf" and not res.has_tex and res.files == []
     assert out.is_dir() and not any(out.iterdir())
     assert res.bytes_before == len(pdf) and res.bytes_after == 0
+    assert res.dropped == {"(pdf)": {"files": 1, "bytes": len(pdf)}}
 
 
 def test_gzipped_pdf_is_detected(tmp_path):

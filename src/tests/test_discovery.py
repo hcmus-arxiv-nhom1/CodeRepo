@@ -128,6 +128,18 @@ def arxiv_handler(calls):
                         "version": 2,
                         "published": "2026-06-02T10:00:00Z",
                         "updated": "2026-07-01T10:00:00Z",
+                        "title": "Second title",
+                    }
+                )
+            elif i == "2606.00002v1":  # the title and authors of v1 differ from the latest
+                entries.append(
+                    {
+                        "id": "2606.00002",
+                        "version": 1,
+                        "published": "2026-06-02T10:00:00Z",
+                        "updated": "2026-06-02T10:00:00Z",
+                        "title": "First title",
+                        "authors": ["Ada Lovelace", "Alan Turing"],
                     }
                 )
         return FakeResponse(200, atom_feed(entries))
@@ -148,6 +160,14 @@ def test_discover_resolves_versions_and_writes_metadata(tmp_path):
     assert meta["submission_date"] == "2026-06-02T10:00:00Z"
     assert meta["revised_dates"] == ["2026-07-01T10:00:00Z", "2026-08-01T10:00:00Z"]
     assert meta["num_versions"] == 3 and meta["venue"] is None
+    # metadata of each version (statement: "for each version, its paper metadata")
+    assert [(v["version"], v["date"], v["title"]) for v in meta["versions"]] == [
+        (1, "2026-06-02T10:00:00Z", "First title"),
+        (2, "2026-07-01T10:00:00Z", "Second title"),
+        (3, "2026-08-01T10:00:00Z", "A title"),
+    ]
+    assert meta["versions"][0]["authors"] == ["Ada Lovelace", "Alan Turing"]
+    assert meta["title"] == "A title"  # paper level = latest version (papers table)
     assert not (tmp_path / "2606-00003").exists()
     # base batch, one retry for the missing ID, one versioned batch, one OAI lookup
     assert len(calls) == 4

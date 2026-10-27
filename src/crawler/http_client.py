@@ -6,18 +6,23 @@
   honouring ``Retry-After``; at most ``max_attempts`` attempts per URL;
 - 3 consecutive 403s trip a circuit breaker: pause 15-30 min and slow pacing to 5 s.
   Too many trips in one run raise ``BlockedError`` so the run stops instead of hammering.
-- downloads stream to ``<dest>.part`` and are renamed only once the body is complete.
+- ``get`` reads small answers (API, OAI-PMH) into memory; ``stream`` hands a download
+  body to a consumer as a file-like object, so a source archive is unpacked while it
+  arrives and never written to disk. A body cut mid-transfer is resumed with a Range
+  request from the byte it stopped at (no backoff, only the 3 s pace): arXiv /src/
+  answers Range with ``206 Partial Content`` (checked on 27/10/2026).
 """
 
 from __future__ import annotations
 
+import io
 import logging
-import os
 import random
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -29,6 +34,7 @@ log = logging.getLogger(__name__)
 
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 CHUNK_SIZE = 1 << 16
+MAX_RESUMES = 5  # Range resumes of one body before restarting it from byte 0
 
 
 class FetchError(Exception):
@@ -46,8 +52,8 @@ class BlockedError(FetchError):
     """arXiv keeps answering 403 even after circuit-breaker pauses: stop the run."""
 
 
-class _IncompleteBody(Exception):
-    pass
+class _CutBody(Exception):
+    """A body broke mid-transfer and could not be resumed; restart it from byte 0."""
 
 
 # Network failures worth retrying. ChunkedEncodingError (connection dropped mid-body) is
@@ -57,8 +63,8 @@ _TRANSIENT_ERRORS = (
     requests.Timeout,
     requests.exceptions.ChunkedEncodingError,
     requests.exceptions.ContentDecodingError,
-    _IncompleteBody,
 )
+_CONTENT_RANGE_RE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
 
 
 @dataclass
@@ -66,11 +72,78 @@ class FetchResult:
     url: str
     status: int
     headers: Mapping[str, str] = field(default_factory=dict)
-    content: bytes | None = None  # body when not streamed (first 4 KiB for error statuses)
-    path: Path | None = None  # file holding the body, when streamed
-    nbytes: int = 0
+    content: bytes | None = None  # body of get() (first 4 KiB for error statuses)
+    value: Any = None  # what the consumer of stream() returned
+    nbytes: int = 0  # body bytes received
     attempts: int = 1
+    resumes: int = 0  # Range resumes of the successful attempt
     elapsed_s: float = 0.0  # request + transfer time of the successful attempt
+
+
+class ResumableBody(io.RawIOBase):
+    """Response body as a readable stream that survives connections cut mid-transfer.
+
+    On a broken transfer it asks the server for the rest (``Range: bytes=<pos>-``)
+    through the shared limiter, checks ``Content-Range`` and carries on, so whatever
+    is reading (gzip, tarfile) never notices.
+    """
+
+    def __init__(self, client: HttpClient, url: str, resp, headers: Mapping[str, str]):
+        self._client, self._url, self._headers = client, url, dict(headers)
+        self._resp = resp
+        self._chunks = resp.iter_content(CHUNK_SIZE)
+        self._buf = b""
+        self.position = 0
+        self.resumes = 0
+        length = resp.headers.get("Content-Length")
+        encoded = resp.headers.get("Content-Encoding", "identity") != "identity"
+        self.total = int(length) if length is not None and not encoded else None
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        while not self._buf:
+            try:
+                self._buf = next(self._chunks)
+            except StopIteration:
+                if self.total is None or self.position >= self.total:
+                    return 0  # end of body
+                self._resume(f"body ended at {self.position} of {self.total} bytes")
+            except _TRANSIENT_ERRORS as exc:
+                self._resume(f"{type(exc).__name__} at {self.position} bytes")
+        n = min(len(b), len(self._buf))
+        b[:n] = self._buf[:n]
+        self._buf = self._buf[n:]
+        self.position += n
+        return n
+
+    def _resume(self, why: str) -> None:
+        if self.resumes >= MAX_RESUMES:
+            raise _CutBody(f"{why}; {MAX_RESUMES} resumes already")
+        self.resumes += 1
+        self._resp.close()
+        log.warning("GET %s cut mid-body (%s), resuming with Range", self._url, why)
+        try:
+            resp = self._client._send(
+                self._url, {**self._headers, "Range": f"bytes={self.position}-"}, stream=True
+            )
+        except _TRANSIENT_ERRORS as exc:
+            raise _CutBody(f"{why}; resume request failed: {exc}") from exc
+        m = _CONTENT_RANGE_RE.match(resp.headers.get("Content-Range", ""))
+        if resp.status_code != 206 or m is None or int(m.group(1)) != self.position:
+            resp.close()
+            raise _CutBody(f"{why}; resume answered {resp.status_code}")
+        self._resp, self._chunks = resp, resp.iter_content(CHUNK_SIZE)
+
+    def drain(self) -> None:
+        """Read whatever is left (used before closing a fully consumed body)."""
+        while self.read(CHUNK_SIZE):
+            pass
+
+    def close(self) -> None:
+        self._resp.close()
+        super().close()
 
 
 class HttpClient:
@@ -111,59 +184,97 @@ class HttpClient:
         self.breaker_trips = 0
         self.requests_sent = 0
 
-    def get(
-        self,
-        url: str,
-        *,
-        dest: Path | None = None,
-        headers: Mapping[str, str] | None = None,
-    ) -> FetchResult:
-        """GET ``url``. With ``dest`` the body is streamed to that file.
+    # ----------------------------------------------------------------- public
+
+    def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> FetchResult:
+        """GET a small answer into memory (``FetchResult.content``).
 
         Returns the result for 200 and for non-retryable statuses (e.g. 404) so the caller
         can decide; raises ``FetchError`` once retries are exhausted.
         """
+        return self._fetch(url, headers, None)
+
+    def stream(
+        self,
+        url: str,
+        consume: Callable[[ResumableBody, Mapping[str, str]], Any],
+        *,
+        headers: Mapping[str, str] | None = None,
+    ) -> FetchResult:
+        """GET ``url`` and pass the 200 body to ``consume(body, headers)`` while it arrives.
+
+        ``FetchResult.value`` is what ``consume`` returned. Exceptions raised by
+        ``consume`` (e.g. a corrupt archive) propagate to the caller.
+        """
+        return self._fetch(url, headers, consume)
+
+    # ----------------------------------------------------------------- internals
+
+    def _send(self, url: str, headers: Mapping[str, str] | None, *, stream: bool):
+        """One request, after waiting its turn (also used for Range resumes)."""
+        with self.limiter:  # re-entrant: _fetch already holds the lock
+            self.requests_sent += 1
+            gap = self.limiter.last_gap_s if self.limiter.calls > 1 else None
+            resp = self.session.get(
+                url, headers=headers or None, timeout=self.timeout, stream=stream
+            )
+            # "gap" = time since the previous request *started*: the auditable pacing figure.
+            log.info(
+                "GET %s -> %d (%s, gap %s)",
+                url,
+                resp.status_code,
+                headers.get("Range", "full body") if headers else "full body",
+                f"{gap:.2f} s" if gap is not None else "-",
+            )
+            return resp
+
+    def _fetch(self, url: str, headers, consume) -> FetchResult:
         last_reason, last_status = "no attempt made", None
         for attempt in range(1, self.max_attempts + 1):
             retry_after: str | None = None
             try:
-                with self.limiter:
-                    self.requests_sent += 1
-                    gap = self.limiter.last_gap_s if self.limiter.calls > 1 else None
+                with self.limiter.hold():  # whole body, resumes included: one connection
                     start = time.perf_counter()
-                    resp = self.session.get(
-                        url, headers=headers, timeout=self.timeout, stream=dest is not None
-                    )
+                    resp = self._send(url, headers, stream=consume is not None)
                     try:
                         status = resp.status_code
                         retry_after = resp.headers.get("Retry-After")
-                        content, nbytes = None, 0
-                        if status == 200:
-                            if dest is not None:
-                                nbytes = self._stream_to(resp, dest)
-                            else:
-                                content = resp.content
-                                nbytes = len(content)
+                        content, value, nbytes, resumes = None, None, 0, 0
+                        if status == 200 and consume is not None:
+                            body = ResumableBody(self, url, resp, headers or {})
+                            try:
+                                value = consume(body, CaseInsensitiveDict(resp.headers))
+                            finally:
+                                nbytes, resumes = body.position, body.resumes
+                                body.close()
+                        elif status == 200:
+                            content = resp.content
+                            nbytes = len(content)
                         else:
                             content = resp.content[:4096]  # error page snippet, for diagnosis
                         elapsed = time.perf_counter() - start
                     finally:
                         resp.close()
+            except _CutBody as exc:
+                # The server answered, then the transfer broke beyond repair: not a rate
+                # limit, so no backoff; the limiter's 3 s pace is the only wait.
+                last_reason, last_status = f"cut mid-body: {exc}", None
+                log.warning("GET %s restarts from byte 0 (%s), attempt %d", url, exc, attempt)
+                continue
             except _TRANSIENT_ERRORS as exc:
                 last_reason, last_status = f"{type(exc).__name__}: {exc}", None
                 log.warning("GET %s failed (%s), attempt %d", url, last_reason, attempt)
                 self._backoff(attempt, None)
                 continue
 
-            # "gap" = time since the previous request *started*: the auditable pacing figure.
             log.info(
-                "GET %s -> %d (%d B, %.2f s, attempt %d, gap %s)",
+                "GET %s done: %d (%d B, %.2f s, attempt %d, %d resume(s))",
                 url,
                 status,
                 nbytes,
                 elapsed,
                 attempt,
-                f"{gap:.2f} s" if gap is not None else "-",
+                resumes,
             )
             last_status = status
             if status == 403:
@@ -184,31 +295,13 @@ class HttpClient:
                 status=status,
                 headers=CaseInsensitiveDict(resp.headers),
                 content=content,
-                path=dest if status == 200 else None,
+                value=value,
                 nbytes=nbytes,
                 attempts=attempt,
+                resumes=resumes,
                 elapsed_s=elapsed,
             )
         raise FetchError(url, last_reason, last_status, self.max_attempts)
-
-    def _stream_to(self, resp: requests.Response, dest: Path) -> int:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        part = dest.with_name(dest.name + ".part")
-        nbytes = 0
-        try:
-            with open(part, "wb") as fh:
-                for chunk in resp.iter_content(CHUNK_SIZE):
-                    fh.write(chunk)
-                    nbytes += len(chunk)
-            expected = resp.headers.get("Content-Length")
-            encoded = resp.headers.get("Content-Encoding", "identity") != "identity"
-            if expected is not None and not encoded and int(expected) != nbytes:
-                raise _IncompleteBody(f"got {nbytes} of {expected} bytes")
-            os.replace(part, dest)
-        except BaseException:
-            part.unlink(missing_ok=True)
-            raise
-        return nbytes
 
     def _backoff(self, attempt: int, retry_after: str | None) -> None:
         delay = None

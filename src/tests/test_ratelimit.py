@@ -72,3 +72,9 @@ def test_only_one_call_in_flight():
 def test_semantic_scholar_pacing_depends_on_api_key():
     assert semantic_scholar_limiter(has_api_key=True).min_interval_s < 2
     assert semantic_scholar_limiter(has_api_key=False).min_interval_s >= 3
+
+
+def test_semantic_scholar_limiter_is_shared():
+    """Two callers (pipeline thread, notebook re-run) must not get two separate budgets."""
+    assert semantic_scholar_limiter(has_api_key=True) is semantic_scholar_limiter(True)
+    assert semantic_scholar_limiter(has_api_key=False) is semantic_scholar_limiter(False)

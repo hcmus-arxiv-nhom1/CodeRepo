@@ -72,6 +72,11 @@ class RateLimiter:
         self.calls += 1
         self._next_start = now + self.min_interval_s + self._rng() * self.jitter_s
 
+    def hold(self) -> threading.RLock:
+        """The lock alone, without taking a turn: keeps one connection across a body that
+        needs several requests (Range resumes), each of which still waits its turn."""
+        return self._lock
+
     def pause_for(self, seconds: float) -> None:
         """Delay the next call by at least ``seconds`` from now (backoff, circuit breaker)."""
         with self._lock:
@@ -97,12 +102,21 @@ def get_arxiv_limiter() -> RateLimiter:
         return _arxiv_limiter
 
 
+_s2_limiters: dict[bool, RateLimiter] = {}
+
+
 def semantic_scholar_limiter(has_api_key: bool | None = None) -> RateLimiter:
-    """Separate limiter for Semantic Scholar, so it can run in parallel with arXiv.
+    """The process-wide Semantic Scholar limiter, separate from arXiv so both run in parallel.
 
     With an API key S2 allows 1 request/s. Without one the shared pool allows
-    100 requests per 5 minutes, i.e. one request every 3 s on average.
+    100 requests per 5 minutes, i.e. one request every 3 s on average. Every caller
+    gets the same instance (spec 0002), so two S2 crawls never double the rate.
     """
     if has_api_key is None:
         has_api_key = config.SEMANTIC_SCHOLAR_API_KEY is not None
-    return RateLimiter(1.1 if has_api_key else 3.0, 0.2, name="semantic_scholar")
+    with _arxiv_limiter_lock:
+        if has_api_key not in _s2_limiters:
+            _s2_limiters[has_api_key] = RateLimiter(
+                1.1 if has_api_key else 3.0, 0.2, name="semantic_scholar"
+            )
+        return _s2_limiters[has_api_key]

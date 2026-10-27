@@ -51,6 +51,7 @@ _WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
 }
 _WINDOWS_BAD_CHARS = set('<>:"|?*')
 _GZIP_ERRORS = (gzip.BadGzipFile, EOFError, zlib.error)
+_CHUNK = 1 << 16
 
 
 class CorruptArchiveError(Exception):
@@ -66,6 +67,14 @@ class ExtractResult:
     bytes_before: int = 0
     bytes_after: int = 0
     skipped_unsafe: int = 0  # links, path traversal, names unusable on this OS
+    # Files left out by the whitelist: extension (".png", "" when none) or, for a source
+    # without any archive member, "(pdf)" / "(html.gz)"... -> {"files": n, "bytes": size}.
+    dropped: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def drop(self, key: str, size: int) -> None:
+        entry = self.dropped.setdefault(key, {"files": 0, "bytes": 0})
+        entry["files"] += 1
+        entry["bytes"] += size
 
 
 # --------------------------------------------------------------------------- detection
@@ -126,21 +135,65 @@ def detect_kind(path: Path) -> str:
     return "gz"  # one compressed file, normally a .tex
 
 
-def _gzip_original_name(path: Path) -> str | None:
-    """Original file name stored in the gzip header (FNAME field), if any."""
-    with open(path, "rb") as fh:
-        header = fh.read(10)
-        if len(header) < 10 or header[:2] != b"\x1f\x8b":
-            return None
-        flags = header[3]
-        if flags & 0x04:  # FEXTRA
-            fh.read(int.from_bytes(fh.read(2), "little"))
-        if not flags & 0x08:  # FNAME
-            return None
-        name = bytearray()
-        while (byte := fh.read(1)) not in (b"", b"\x00") and len(name) < 1024:
-            name += byte
-    return name.decode("latin-1") or None
+def _gzip_name_from_header(head: bytes) -> str | None:
+    """Original file name stored in a gzip header (FNAME field), if any."""
+    if len(head) < 10 or head[:2] != b"\x1f\x8b":
+        return None
+    flags, pos = head[3], 10
+    if flags & 0x04:  # FEXTRA
+        pos += 2 + int.from_bytes(head[10:12], "little")
+    if not flags & 0x08:  # FNAME
+        return None
+    end = head.find(b"\x00", pos)
+    return head[pos : end if end != -1 else None].decode("latin-1") or None
+
+
+def _tar_header_ok(block: bytes) -> bool:
+    """True when ``block`` is a valid tar header, ustar magic or not (old tar formats)."""
+    try:
+        tarfile.TarInfo.frombuf(block[:512], "utf-8", "surrogateescape")
+    except tarfile.TarError:
+        return False
+    return True
+
+
+class _Reader:
+    """Read-ahead wrapper: ``peek`` the first bytes to detect the type, count raw bytes,
+    optionally copy them to ``tee`` (raw responses kept as fixtures by the spike)."""
+
+    def __init__(self, raw: BinaryIO, tee: BinaryIO | None = None) -> None:
+        self._raw, self._tee = raw, tee
+        self._buf = b""
+        self.count = 0
+
+    def _more(self, n: int) -> bytes:
+        chunk = self._raw.read(n)
+        if chunk:
+            self.count += len(chunk)
+            if self._tee is not None:
+                self._tee.write(chunk)
+        return chunk
+
+    def peek(self, n: int) -> bytes:
+        while len(self._buf) < n and (chunk := self._more(max(n - len(self._buf), _CHUNK))):
+            self._buf += chunk
+        return self._buf[:n]
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            parts = [self._buf]
+            while chunk := self._more(_CHUNK):
+                parts.append(chunk)
+            self._buf = b""
+            return b"".join(parts)
+        if not self._buf:
+            return self._more(n)
+        out, self._buf = self._buf[:n], self._buf[n:]
+        return out
+
+    def drain(self) -> None:
+        while self.read(_CHUNK):
+            pass
 
 
 # --------------------------------------------------------------------------- safe writing
@@ -189,9 +242,11 @@ def _keep(rel: PurePosixPath, keep_extensions: Iterable[str]) -> bool:
 # --------------------------------------------------------------------------- extractors
 
 
-def _extract_tar(archive: Path, out_dir: Path, keep: frozenset[str], res: ExtractResult) -> None:
+def _extract_tar(src, out_dir: Path, keep: frozenset[str], res: ExtractResult) -> None:
+    """Members of a tar *stream* one by one (``r|``: no seeking, so it works on a download
+    in progress); only kept members are written, the others are read past."""
     try:
-        with tarfile.open(archive, "r:*") as tf:
+        with tarfile.open(fileobj=src, mode="r|") as tf:
             for member in tf:
                 if member.issym() or member.islnk():
                     res.skipped_unsafe += 1
@@ -204,6 +259,7 @@ def _extract_tar(archive: Path, out_dir: Path, keep: frozenset[str], res: Extrac
                     res.skipped_unsafe += 1
                     continue
                 if not _keep(rel, keep):
+                    res.drop(rel.suffix.lower(), member.size)
                     continue
                 src = tf.extractfile(member)
                 if src is None:
@@ -215,7 +271,7 @@ def _extract_tar(archive: Path, out_dir: Path, keep: frozenset[str], res: Extrac
                 res.bytes_after += member.size
                 res.files.append(rel.as_posix())
     except (tarfile.TarError, *_GZIP_ERRORS) as exc:
-        raise CorruptArchiveError(f"{archive.name}: {exc}") from exc
+        raise CorruptArchiveError(f"tar: {exc}") from exc
 
 
 def _extract_zip(archive: Path, out_dir: Path, keep: frozenset[str], res: ExtractResult) -> None:
@@ -233,6 +289,7 @@ def _extract_zip(archive: Path, out_dir: Path, keep: frozenset[str], res: Extrac
                     res.skipped_unsafe += 1
                     continue
                 if not _keep(rel, keep):
+                    res.drop(rel.suffix.lower(), info.file_size)
                     continue
                 with zf.open(info) as src:
                     if not _write_member(src, out_dir, rel):
@@ -258,15 +315,95 @@ def _extract_single(
     data: bytes, name: str | None, out_dir: Path, keep: frozenset[str], res: ExtractResult
 ) -> None:
     res.bytes_before = len(data)
-    if _sniff(data[:HEAD_BYTES]) not in ("tex", "text"):
+    sniffed = _sniff(data[:HEAD_BYTES])
+    if sniffed not in ("tex", "text"):
+        res.drop(f"({sniffed})", len(data))
         return  # PDF, PostScript, HTML, binary...: empty record
     named_tex = name is not None and name.lower().endswith(".tex")
     if not (named_tex or _looks_like_tex(data)):
+        res.drop("(text)", len(data))
         return  # plain text that is not TeX: empty record
     rel = _single_file_name(name, keep)
     (out_dir / rel).write_bytes(data)
     res.bytes_after = len(data)
     res.files.append(rel.as_posix())
+
+
+def extract_stream(
+    raw: BinaryIO,
+    out_dir: Path,
+    keep_extensions: Iterable[str] = config.KEEP_EXTENSIONS,
+    filename_hint: str | None = None,
+    size_hint: int | None = None,
+    tee: BinaryIO | None = None,
+) -> ExtractResult:
+    """Unpack a source *while it is read* into a fresh ``out_dir``, keeping text files.
+
+    The archive is never stored: tar members are written only when their extension is
+    kept and read past otherwise, and a source without TeX (PDF, PostScript, HTML) is
+    recognised from its first bytes, so the rest of it is not even downloaded.
+    ``size_hint`` (Content-Length or file size) is the archive size for those early
+    stops; ``filename_hint`` (Content-Disposition) names a single uncompressed file.
+    Raises ``CorruptArchiveError`` for unreadable archives.
+    """
+    keep = frozenset(e.lower() for e in keep_extensions)
+    if out_dir.exists():
+        shutil.rmtree(out_dir)  # leftovers of an interrupted extraction
+    out_dir.mkdir(parents=True)
+
+    src = _Reader(raw, tee)
+    head = src.peek(HEAD_BYTES)
+    res = ExtractResult(kind=_sniff(head))
+    if res.kind == "gzip":
+        gz = _Reader(gzip.GzipFile(fileobj=src, mode="rb"))
+        try:
+            inner = gz.peek(HEAD_BYTES)
+        except _GZIP_ERRORS as exc:
+            raise CorruptArchiveError(f"gzip: {exc}") from exc
+        inner_kind = _sniff(inner)
+        if inner_kind == "tar" or (inner_kind in ("text", "unknown") and _tar_header_ok(inner)):
+            res.kind = "tar.gz"  # second test catches old tar formats without the ustar magic
+            _extract_tar(gz, out_dir, keep, res)
+        elif inner_kind == "html":
+            res.kind = "html.gz"  # submitted HTML (proceedings index), not an error page
+        elif inner_kind in ("pdf", "ps", "empty"):
+            res.kind = inner_kind
+        else:  # one compressed file, normally a .tex
+            res.kind = "gz"
+            try:
+                data = gz.read()
+            except _GZIP_ERRORS as exc:
+                raise CorruptArchiveError(f"gzip: {exc}") from exc
+            _extract_single(data, _gzip_name_from_header(head), out_dir, keep, res)
+        if res.kind in ("tar.gz", "gz"):
+            try:
+                gz.drain()  # reach the gzip trailer: its CRC check catches corrupt bodies
+            except _GZIP_ERRORS as exc:
+                raise CorruptArchiveError(f"gzip: {exc}") from exc
+    elif res.kind == "tar":
+        _extract_tar(src, out_dir, keep, res)
+    elif res.kind == "zip":  # the central directory is at the end: spool to disk (rare)
+        spool = out_dir.parent / f".{out_dir.name}.zip.part"
+        try:
+            with open(spool, "wb") as fh:
+                fh.write(src.read())
+            _extract_zip(spool, out_dir, keep, res)
+        finally:
+            spool.unlink(missing_ok=True)
+    elif res.kind == "tex":
+        _extract_single(src.read(), filename_hint, out_dir, keep, res)
+
+    if res.kind in ("tar.gz", "tar", "gz", "zip", "tex") or tee is not None:
+        src.drain()  # whole body read: archive_bytes is exact (and a fixture is complete)
+        res.archive_bytes = src.count
+    else:  # no TeX source: stop downloading after the first bytes
+        res.archive_bytes = size_hint if size_hint is not None else src.count
+        res.bytes_before = res.archive_bytes
+        if res.archive_bytes:
+            res.drop(f"({res.kind})", res.archive_bytes)
+    res.files.sort()
+    res.has_tex = any(f.lower().endswith(".tex") for f in res.files)
+    return res
 
 
 def extract_version(
@@ -275,33 +412,6 @@ def extract_version(
     keep_extensions: Iterable[str] = config.KEEP_EXTENSIONS,
     filename_hint: str | None = None,
 ) -> ExtractResult:
-    """Unpack ``archive`` into a fresh ``out_dir`` keeping text files; return size/kind stats.
-
-    ``filename_hint`` is the Content-Disposition file name, used to name a single
-    uncompressed file. Raises ``CorruptArchiveError`` for unreadable archives.
-    """
-    keep = frozenset(e.lower() for e in keep_extensions)
-    if out_dir.exists():
-        shutil.rmtree(out_dir)  # leftovers of an interrupted extraction
-    out_dir.mkdir(parents=True)
-
-    res = ExtractResult(kind=detect_kind(archive), archive_bytes=archive.stat().st_size)
-    if res.kind in ("tar.gz", "tar"):
-        _extract_tar(archive, out_dir, keep, res)
-    elif res.kind == "zip":
-        _extract_zip(archive, out_dir, keep, res)
-    elif res.kind == "gz":
-        try:
-            with gzip.open(archive, "rb") as gz:
-                data = gz.read()
-        except _GZIP_ERRORS as exc:
-            raise CorruptArchiveError(f"{archive.name}: {exc}") from exc
-        _extract_single(data, _gzip_original_name(archive), out_dir, keep, res)
-    elif res.kind == "tex":
-        _extract_single(archive.read_bytes(), filename_hint, out_dir, keep, res)
-    else:  # pdf, ps, html, text, empty, unknown: no TeX source
-        res.bytes_before = res.archive_bytes
-
-    res.files.sort()
-    res.has_tex = any(f.lower().endswith(".tex") for f in res.files)
-    return res
+    """``extract_stream`` on a file already on disk (tests, saved fixtures)."""
+    with open(archive, "rb") as fh:
+        return extract_stream(fh, out_dir, keep_extensions, filename_hint, archive.stat().st_size)
