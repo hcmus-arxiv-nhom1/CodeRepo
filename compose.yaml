@@ -1,0 +1,169 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  coordinator:
+    build: .
+    command:
+      - python
+      - -m
+      - src.crawler.coordinator
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8780"
+      - --min-interval
+      - "${ARXIV_MIN_GAP_S:-3.0}"
+      - --lease-ttl
+      - "${LEASE_TTL_S:-60}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request as u; u.urlopen(u.Request('http://localhost:8780/stats', data=b'{}'), timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  crawler-worker:
+    build: .
+    command:
+      - python
+      - -m
+      - src.crawler.worker
+      - --redis-url
+      - redis://redis:6379/0
+      - --coordinator-url
+      - http://coordinator:8780
+      - --data-root
+      - /data/corpus
+      - --work-dir
+      - /data/work
+      - --visibility-timeout-s
+      - "${JOB_VISIBILITY_TIMEOUT_S:-300}"
+      - --max-attempts
+      - "${MAX_ATTEMPTS:-3}"
+    environment:
+      ARXIV_CONTACT_EMAIL: ${ARXIV_CONTACT_EMAIL:-}
+    volumes:
+      - ${CORPUS_HOST_PATH:-./data/corpus}:/data/corpus
+      - ${WORK_HOST_PATH:-./work}:/data/work
+    depends_on:
+      redis:
+        condition: service_healthy
+      coordinator:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: ${CRAWLER_WORKERS:-3}
+
+  crawler-producer:
+    build: .
+    command:
+      - python
+      - -m
+      - src.crawler.producer
+      - --range
+      - ${CRAWL_RANGE:-thien}
+      - --offset
+      - ${CRAWL_OFFSET:-0}
+      - --limit
+      - ${CRAWL_LIMIT:-100}
+      - --redis-url
+      - redis://redis:6379/0
+      - --coordinator-url
+      - http://coordinator:8780
+      - --data-root
+      - /data/corpus
+      - --work-dir
+      - /data/work
+      - --no-references
+    environment:
+      ARXIV_CONTACT_EMAIL: ${ARXIV_CONTACT_EMAIL:-}
+      DISCOVERY_TIERS: ${DISCOVERY_TIERS:-5,10,20,50,100}
+      DISCOVERY_BACKLOG_STEPS: ${DISCOVERY_BACKLOG_STEPS:-10,30,60,100}
+      DISCOVERY_COOLDOWN_ROUNDS: ${DISCOVERY_COOLDOWN_ROUNDS:-3}
+    volumes:
+      - ${CORPUS_HOST_PATH:-./data/corpus}:/data/corpus
+      - ${WORK_HOST_PATH:-./work}:/data/work
+    depends_on:
+      redis:
+        condition: service_healthy
+      coordinator:
+        condition: service_healthy
+    restart: "no"
+
+  crawler:
+    profiles: ["single"]
+    build: .
+    command:
+      - python
+      - -m
+      - src.run_pipeline
+      - --range
+      - ${CRAWL_RANGE:-thien}
+      - --offset
+      - ${CRAWL_OFFSET:-0}
+      - --limit
+      - ${CRAWL_LIMIT:-100}
+      - --redis-url
+      - redis://redis:6379/0
+      - --queue-seed
+      - ${QUEUE_SEED:-10}
+      - --queue-high-watermark
+      - ${QUEUE_HIGH_WATERMARK:-100}
+      - --queue-max-prefetch
+      - ${QUEUE_MAX_PREFETCH:-200}
+      - --data-root
+      - /data/corpus
+      - --work-dir
+      - /data/work
+      - --no-progress
+    environment:
+      ARXIV_CONTACT_EMAIL: ${ARXIV_CONTACT_EMAIL:-}
+    volumes:
+      - ${CORPUS_HOST_PATH:-./data/corpus}:/data/corpus
+      - ${WORK_HOST_PATH:-./work}:/data/work
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: "no"
+    deploy:
+      replicas: 1
+
+  parser-worker:
+    build: .
+    command:
+      - python
+      - -m
+      - src.parser.worker
+      - --redis-url
+      - redis://redis:6379/0
+      - --queue-stream
+      - parser-jobs
+      - --queue-group
+      - parser-workers
+      - --corpus-root
+      - /data/corpus
+      - --output-root
+      - /data/parsed
+    volumes:
+      - ${CORPUS_HOST_PATH:-./data/corpus}:/data/corpus:ro
+      - ${PARSER_OUTPUT_HOST_PATH:-./data/parsed}:/data/parsed
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:

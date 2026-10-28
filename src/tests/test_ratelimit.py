@@ -78,3 +78,24 @@ def test_semantic_scholar_limiter_is_shared():
     """Two callers (pipeline thread, notebook re-run) must not get two separate budgets."""
     assert semantic_scholar_limiter(has_api_key=True) is semantic_scholar_limiter(True)
     assert semantic_scholar_limiter(has_api_key=False) is semantic_scholar_limiter(False)
+
+
+def test_rate_limiter_rechecks_after_sleep_undershoots():
+    now = [0.0]
+    sleeps = []
+
+    def clock():
+        return now[0]
+
+    def undersleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds * 0.5
+
+    limiter = RateLimiter(1.0, clock=clock, sleep=undersleep)
+    with limiter:
+        pass
+    with limiter:
+        pass
+
+    assert len(sleeps) > 1
+    assert limiter.min_gap_s >= 1.0

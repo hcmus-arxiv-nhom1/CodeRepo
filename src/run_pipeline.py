@@ -49,7 +49,9 @@ from src import config
 from src.crawler.discovery import discover
 from src.crawler.downloader import download_version
 from src.crawler.http_client import HttpClient
+from src.crawler.queue import ParserJob, RedisJobQueue
 from src.crawler.ratelimit import get_arxiv_limiter
+from src.crawler.scheduler import AdaptiveBatchScheduler
 from src.crawler.worklock import WorkDirLock, WorkDirLockedError
 from src.utils.ids import iter_id_range, to_folder_name
 
@@ -105,6 +107,20 @@ def is_done(rec: dict | None, data_root: Path) -> bool:
     )
 
 
+def _publish_parser_job(
+    job_queue: RedisJobQueue, data_root: Path, arxiv_id: str, version: int
+) -> str:
+    metadata_path = data_root / to_folder_name(arxiv_id) / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    job = ParserJob.create(
+        arxiv_id,
+        version,
+        version_dir(data_root, arxiv_id, version).relative_to(data_root).as_posix(),
+        metadata,
+    )
+    return job_queue.publish(job)
+
+
 def process_version(
     client: HttpClient,
     arxiv_id: str,
@@ -125,7 +141,9 @@ def process_version(
             http_status=dl.http_status,
             content_type=dl.content_type,
             archive_name=dl.filename,
-            download_s=round(dl.elapsed_s, 3),  # download and extraction overlap
+            download_s=round(dl.elapsed_s + dl.wait_s, 3),  # elapsed + limiter wait
+            limiter_wait_s=round(dl.wait_s, 3),
+            transfer_extract_s=round(dl.elapsed_s, 3),  # streamed transfer and extraction overlap
             received_bytes=dl.nbytes,
             attempts=dl.attempts,
             resumes=dl.resumes,
@@ -270,6 +288,85 @@ def write_failed_csv(
     return len(rows)
 
 
+def _run_queued_batches(
+    ids: list[str],
+    *,
+    data_root: Path,
+    work_dir: Path,
+    client: HttpClient | None,
+    snapshot: Path | None,
+    keep_extensions: frozenset[str],
+    keep_archives: bool,
+    references: bool,
+    refresh_metadata: bool,
+    progress: bool,
+    label: str | None,
+    job_queue: RedisJobQueue,
+    scheduler: AdaptiveBatchScheduler,
+) -> dict:
+    remaining = ids[:]
+    batch_size = scheduler.seed
+    summaries = []
+    completed_before = job_queue.completed_count()
+    while remaining:
+        batch = remaining[:batch_size]
+        summary = run(
+            batch,
+            data_root=data_root,
+            work_dir=work_dir,
+            client=client,
+            snapshot=snapshot,
+            keep_extensions=keep_extensions,
+            keep_archives=keep_archives,
+            references=references,
+            refresh_metadata=refresh_metadata,
+            progress=progress,
+            label=label,
+            job_queue=job_queue,
+            scheduler=None,
+        )
+        summaries.append(summary)
+        remaining = remaining[len(batch) :]
+        if not remaining:
+            break
+
+        backlog = job_queue.depth()
+        completed = job_queue.completed_count()
+        progressed = completed > completed_before
+        if backlog > 0 and (backlog >= scheduler.high_watermark or not progressed):
+            log.warning("queue backpressure: waiting for parser worker acknowledgements")
+            while backlog > scheduler.low_watermark or completed == completed_before:
+                time.sleep(1)
+                backlog = job_queue.depth()
+                completed = job_queue.completed_count()
+            progressed = completed > completed_before
+
+        batch_size = scheduler.next_batch(backlog, progressed or backlog == 0)
+        completed_before = completed
+        if batch_size == 0:
+            log.warning("queue has no progress; stopping crawl before admitting more IDs")
+            break
+
+    combined = dict(summaries[-1]) if summaries else {}
+    additive = (
+        "wall_s",
+        "discovery_s",
+        "versions_processed_this_run",
+        "arxiv_requests",
+        "failed_rows",
+    )
+    for key in additive:
+        combined[key] = round(sum(item.get(key, 0) or 0 for item in summaries), 3)
+    combined.update(
+        first_id=ids[0],
+        last_id=ids[-1],
+        ids_requested=len(ids),
+        batches=len(summaries),
+        batch_summaries=summaries,
+    )
+    return combined
+
+
 def run(
     ids: list[str],
     *,
@@ -283,8 +380,27 @@ def run(
     refresh_metadata: bool = False,
     progress: bool = True,
     label: str | None = None,
+    job_queue: RedisJobQueue | None = None,
+    scheduler: AdaptiveBatchScheduler | None = None,
 ) -> dict:
     """Discover ``ids``, then download and extract every version not done yet."""
+    if scheduler is not None and job_queue is not None:
+        return _run_queued_batches(
+            ids,
+            data_root=data_root,
+            work_dir=work_dir,
+            client=client,
+            snapshot=snapshot,
+            keep_extensions=keep_extensions,
+            keep_archives=keep_archives,
+            references=references,
+            refresh_metadata=refresh_metadata,
+            progress=progress,
+            label=label,
+            job_queue=job_queue,
+            scheduler=scheduler,
+        )
+
     data_root.mkdir(parents=True, exist_ok=True)
     work_dir.mkdir(parents=True, exist_ok=True)
     lock = WorkDirLock(work_dir)
@@ -324,6 +440,11 @@ def run(
             for v in range(1, found.get(i, 0) + 1)
             if not is_done(state.get((i, v)), data_root)
         ]
+        if job_queue is not None:
+            for (arxiv_id, version), rec in state.items():
+                if arxiv_id in found and rec.get("status") == "ok":
+                    _publish_parser_job(job_queue, data_root, arxiv_id, version)
+
         log.info(
             "%d versions in total, %d already done, %d to crawl",
             sum(found.values()),
@@ -345,6 +466,8 @@ def run(
             ver_log.write(rec)
             state[(arxiv_id, version)] = rec
             processed.append(rec)
+            if job_queue is not None and rec.get("status") == "ok":
+                _publish_parser_job(job_queue, data_root, arxiv_id, version)
             if rec["status"] == "failed":
                 log.warning("%sv%d failed: %s", arxiv_id, version, rec.get("reason"))
             bar.update(1)
@@ -385,6 +508,16 @@ def run(
             else None,
             "mean_download_s": round(
                 sum(r.get("download_s") or 0 for r in processed) / len(processed), 3
+            )
+            if processed
+            else None,
+            "mean_limiter_wait_s": round(
+                sum(r.get("limiter_wait_s") or 0 for r in processed) / len(processed), 3
+            )
+            if processed
+            else None,
+            "mean_transfer_extract_s": round(
+                sum(r.get("transfer_extract_s") or 0 for r in processed) / len(processed), 3
             )
             if processed
             else None,
@@ -489,6 +622,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--refresh-metadata", action="store_true", help="re-run discovery")
     parser.add_argument("--no-progress", action="store_true", help="log lines instead of a bar")
     parser.add_argument("--dry-run", action="store_true", help="only list the IDs to crawl")
+    parser.add_argument("--redis-url", help="enable parser queue mode with this Redis URL")
+    parser.add_argument("--queue-stream", default="parser-jobs")
+    parser.add_argument("--queue-group", default="parser-workers")
+    parser.add_argument("--queue-seed", type=int, default=10)
+    parser.add_argument("--queue-max-batch", type=int, default=100)
+    parser.add_argument("--queue-step", type=int, default=10)
+    parser.add_argument("--queue-low-watermark", type=int, default=20)
+    parser.add_argument("--queue-high-watermark", type=int, default=100)
+    parser.add_argument("--queue-max-prefetch", type=int, default=200)
     return parser
 
 
@@ -505,6 +647,23 @@ def main(argv: list[str] | None = None) -> int:
         for e in args.keep_ext.split(",")
         if e.strip()
     )
+    queue = None
+    scheduler = None
+    if args.redis_url:
+        queue = RedisJobQueue(
+            args.redis_url,
+            args.queue_stream,
+            args.queue_group,
+            consumer=f"crawler-{os.getpid()}",
+        )
+        scheduler = AdaptiveBatchScheduler(
+            seed=args.queue_seed,
+            max_batch=args.queue_max_batch,
+            step=args.queue_step,
+            low_watermark=args.queue_low_watermark,
+            high_watermark=args.queue_high_watermark,
+            max_prefetch=args.queue_max_prefetch,
+        )
     try:
         summary = run(
             ids,
@@ -517,6 +676,8 @@ def main(argv: list[str] | None = None) -> int:
             refresh_metadata=args.refresh_metadata,
             progress=not args.no_progress,
             label=label,
+            job_queue=queue,
+            scheduler=scheduler,
         )
     except KeyboardInterrupt:
         print("interrupted: re-run the same command to resume", file=sys.stderr)

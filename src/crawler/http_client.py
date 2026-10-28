@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 CHUNK_SIZE = 1 << 16
 MAX_RESUMES = 5  # Range resumes of one body before restarting it from byte 0
+MAX_RESUME_REJECTIONS = 3  # 429/5xx answers to one Range request before restarting from byte 0
 
 
 class FetchError(Exception):
@@ -77,7 +78,8 @@ class FetchResult:
     nbytes: int = 0  # body bytes received
     attempts: int = 1
     resumes: int = 0  # Range resumes of the successful attempt
-    elapsed_s: float = 0.0  # request + transfer time of the successful attempt
+    elapsed_s: float = 0.0  # request + transfer + streamed extraction; excludes limiter wait
+    wait_s: float = 0.0  # limiter wait for the successful attempt, including Range resumes
 
 
 class ResumableBody(io.RawIOBase):
@@ -124,12 +126,20 @@ class ResumableBody(io.RawIOBase):
         self.resumes += 1
         self._resp.close()
         log.warning("GET %s cut mid-body (%s), resuming with Range", self._url, why)
-        try:
-            resp = self._client._send(
-                self._url, {**self._headers, "Range": f"bytes={self.position}-"}, stream=True
-            )
-        except _TRANSIENT_ERRORS as exc:
-            raise _CutBody(f"{why}; resume request failed: {exc}") from exc
+        range_headers = {**self._headers, "Range": f"bytes={self.position}-"}
+        for rejected in range(1, MAX_RESUME_REJECTIONS + 1):
+            try:
+                resp = self._client._send(self._url, range_headers, stream=True)
+            except _TRANSIENT_ERRORS as exc:
+                raise _CutBody(f"{why}; resume request failed: {exc}") from exc
+            if resp.status_code not in RETRYABLE_STATUS:
+                break
+            # Rate limited or overloaded: keep the bytes already read, wait, ask again.
+            retry_after = resp.headers.get("Retry-After")
+            resp.close()
+            if rejected == MAX_RESUME_REJECTIONS:
+                raise _CutBody(f"{why}; resume answered {resp.status_code} {rejected} times")
+            self._client._backoff(rejected, retry_after)
         m = _CONTENT_RANGE_RE.match(resp.headers.get("Content-Range", ""))
         if resp.status_code != 206 or m is None or int(m.group(1)) != self.position:
             resp.close()
@@ -230,6 +240,7 @@ class HttpClient:
 
     def _fetch(self, url: str, headers, consume) -> FetchResult:
         last_reason, last_status = "no attempt made", None
+        wait_before = self.limiter.wait_s
         for attempt in range(1, self.max_attempts + 1):
             retry_after: str | None = None
             try:
@@ -300,6 +311,7 @@ class HttpClient:
                 attempts=attempt,
                 resumes=resumes,
                 elapsed_s=elapsed,
+                wait_s=self.limiter.wait_s - wait_before,
             )
         raise FetchError(url, last_reason, last_status, self.max_attempts)
 
