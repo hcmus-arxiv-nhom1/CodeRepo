@@ -95,6 +95,26 @@ def load_version_state(path: Path) -> dict[tuple[str, int], dict]:
     return state
 
 
+def compact_versions_log(path: Path, state: dict[tuple[str, int], dict]) -> int:
+    """Rewrite *path* keeping only the latest record per (arxiv_id, version).
+
+    Uses an atomic write pattern (write to a temp file, then ``os.replace``)
+    so a crash during compaction never corrupts the original log.
+
+    Returns the number of records written (== unique keys in *state*).
+    """
+    if not state:
+        return 0
+    tmp = path.with_suffix(".jsonl.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for rec in state.values():
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    return len(state)
+
+
 def version_dir(data_root: Path, arxiv_id: str, version: int) -> Path:
     return data_root / to_folder_name(arxiv_id) / f"v{version}"
 
@@ -185,6 +205,32 @@ def process_version(
                 "reason": f"unexpected {res.kind} response",
                 "total_s": _since(start),
             }
+        # Inline validation: check that .tex files are not empty (0 bytes).
+        # An empty .tex is almost certainly a bug (arXiv error page, truncated
+        # download) and should not count as "ok".  The old code only caught
+        # this in the post-hoc QA step (validate.py).  no_tex is a final status,
+        # so the version is not retried; it is also not sent to the parser queue.
+        if res.has_tex:
+            empty_tex = [
+                f
+                for f in res.files
+                if f.lower().endswith(".tex")
+                and (vdir / f).exists()
+                and (vdir / f).stat().st_size == 0
+            ]
+            if empty_tex and all(
+                f.lower().endswith(".tex") and (vdir / f).stat().st_size == 0
+                for f in res.files
+                if f.lower().endswith(".tex")
+            ):
+                log.warning(
+                    "%sv%d: all %d .tex file(s) are empty, marking as no_tex",
+                    arxiv_id,
+                    version,
+                    len(empty_tex),
+                )
+                rec["empty_tex_files"] = empty_tex
+                return {**rec, "status": "no_tex", "total_s": _since(start)}
         return {**rec, "status": "ok" if res.has_tex else "no_tex", "total_s": _since(start)}
 
     shutil.rmtree(vdir, ignore_errors=True)
@@ -491,6 +537,12 @@ def run(
     finally:
         disc_log.close()
         ver_log.close()
+        # Compact versions.jsonl: keep only the latest record per (id, version).
+        # This prevents the file from growing without bound across many retries.
+        ver_path = work_dir / "versions.jsonl"
+        compacted = compact_versions_log(ver_path, state)
+        if compacted:
+            log.info("versions.jsonl compacted: %d unique records", compacted)
         shutil.rmtree(work_dir / "tmp", ignore_errors=True)  # left by versions before 27/10
         wall_s = time.perf_counter() - t0
         summary = {

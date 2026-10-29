@@ -206,20 +206,26 @@ def crawl(
     *,
     client: S2Client | None = None,
     batch_size: int = BATCH_SIZE,
+    max_batch_retries: int = 1,
 ) -> dict:
-    """Write references.json for every paper of ``arxiv_ids`` not done yet; return counts."""
+    """Write references.json for every paper of ``arxiv_ids`` not done yet; return counts.
+
+    Failed batches are retried up to ``max_batch_retries`` times within the
+    same run before being left for the next run.
+    """
     data_root = Path(data_root)
     client = client or S2Client()
     todo = [i for i in arxiv_ids if not is_done(data_root, i)]
     log.info("references: %d papers, %d already done", len(arxiv_ids), len(arxiv_ids) - len(todo))
     counts = {"ok": 0, "not_found": 0, "failed": 0, "references": 0, "arxiv_references": 0}
     start = time.perf_counter()
+    failed_batches: list[list[str]] = []
     for batch in _batches(todo, batch_size):
         try:
             papers = client.batch(batch)
         except S2Error as exc:
-            log.error("references: batch of %d failed, retried next run (%s)", len(batch), exc)
-            counts["failed"] += len(batch)
+            log.error("references: batch of %d failed (%s), queued for retry", len(batch), exc)
+            failed_batches.append(batch)
             continue
         for arxiv_id, paper in zip(batch, papers, strict=True):
             refs = (paper or {}).get("references") or []
@@ -235,6 +241,45 @@ def crawl(
             counts[record["status"]] += 1
             counts["references"] += record["num_references"]
             counts["arxiv_references"] += record["num_arxiv_references"]
+    # Retry failed batches within the same run (up to max_batch_retries rounds).
+    for retry_round in range(1, max_batch_retries + 1):
+        if not failed_batches:
+            break
+        retrying, failed_batches = failed_batches, []
+        log.info(
+            "references: retry round %d for %d batch(es) (%d papers)",
+            retry_round,
+            len(retrying),
+            sum(len(b) for b in retrying),
+        )
+        for batch in retrying:
+            try:
+                papers = client.batch(batch)
+            except S2Error as exc:
+                log.error(
+                    "references: batch of %d still failing on retry %d (%s)",
+                    len(batch),
+                    retry_round,
+                    exc,
+                )
+                failed_batches.append(batch)
+                continue
+            for arxiv_id, paper in zip(batch, papers, strict=True):
+                refs = (paper or {}).get("references") or []
+                if paper is not None and len(refs) >= NESTED_REFERENCE_CAP:
+                    try:
+                        refs = client.all_references(paper["paperId"])
+                    except S2Error as exc:
+                        log.error("references: %s paginated fetch failed (%s)", arxiv_id, exc)
+                        counts["failed"] += 1
+                        continue
+                record = build_record(arxiv_id, paper, refs)
+                write_record(data_root, record)
+                counts[record["status"]] += 1
+                counts["references"] += record["num_references"]
+                counts["arxiv_references"] += record["num_arxiv_references"]
+    # Count papers from batches that still failed after all retries.
+    counts["failed"] += sum(len(b) for b in failed_batches)
     counts.update(
         papers=len(arxiv_ids),
         skipped=len(arxiv_ids) - len(todo),
