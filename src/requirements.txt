@@ -2,12 +2,13 @@
 # Runtime dependencies — reproduce the environment with:
 #   pip install -r src/requirements.txt
 # Target: Python 3.12 (Google Colab CPU-only runtime).
+# Compatible with Google Colab pre-installed packages (google-colab 1.0.0).
 # No arxiv.py: every arXiv call goes through requests + the shared RateLimiter.
-requests==2.34.2
-lxml==6.1.3
-psutil==7.2.2
-pandas==3.0.6
-pyarrow==26.0.0
-tqdm==4.70.1
-kaggle==2.2.4
-redis==7.2.1
+requests>=2.31.0,<2.35.0
+lxml>=5.0.0
+psutil>=5.9.0
+pandas>=2.0.0,<3.0.0
+pyarrow>=14.0.0
+tqdm>=4.66.0
+kaggle>=1.6.0
+redis>=5.0.0
