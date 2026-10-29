@@ -115,6 +115,11 @@ def make_server(
     limiter: RateLimiter, host: str = "127.0.0.1", port: int = 0, *, lease_ttl_s: float = 60.0
 ):
     state = _State(limiter, lease_ttl_s)
+    floor_s = limiter.min_interval_s  # /interval may slow the cluster down, never speed it up
+
+    def set_interval(seconds: float) -> dict:
+        limiter.set_min_interval(max(floor_s, seconds))
+        return {}
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:  # noqa: N802
@@ -127,7 +132,7 @@ def make_server(
                 "/renew": lambda: state.renew(owner),
                 "/stats": state.stats,
                 "/pause": lambda: limiter.pause_for(float(body["seconds"])) or {},
-                "/interval": lambda: limiter.set_min_interval(float(body["seconds"])) or {},
+                "/interval": lambda: set_interval(float(body["seconds"])),
             }
             handler = routes.get(self.path)
             if handler is None:

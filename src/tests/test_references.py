@@ -118,6 +118,12 @@ def test_failed_batch_leaves_no_file_and_is_retried_next_run(tmp_path):
     assert crawl(["2606.30762"], tmp_path, client=client_for(fake))["ok"] == 1
 
 
+def test_failed_batch_is_retried_once_in_the_same_run(tmp_path):
+    fake = FakeS2({"2606.30762": [REF_ARXIV]}, fail_first=5)  # the first batch call gives up
+    counts = crawl(["2606.30762"], tmp_path, client=client_for(fake))
+    assert counts["ok"] == 1 and counts["failed"] == 0
+
+
 def test_long_reference_list_uses_the_paginated_endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(refs_mod, "NESTED_REFERENCE_CAP", 3)
     monkeypatch.setattr(refs_mod, "PAGE_LIMIT", 2)

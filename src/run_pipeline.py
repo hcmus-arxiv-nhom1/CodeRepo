@@ -205,32 +205,15 @@ def process_version(
                 "reason": f"unexpected {res.kind} response",
                 "total_s": _since(start),
             }
-        # Inline validation: check that .tex files are not empty (0 bytes).
-        # An empty .tex is almost certainly a bug (arXiv error page, truncated
-        # download) and should not count as "ok".  The old code only caught
-        # this in the post-hoc QA step (validate.py).  no_tex is a final status,
-        # so the version is not retried; it is also not sent to the parser queue.
-        if res.has_tex:
-            empty_tex = [
-                f
-                for f in res.files
-                if f.lower().endswith(".tex")
-                and (vdir / f).exists()
-                and (vdir / f).stat().st_size == 0
-            ]
-            if empty_tex and all(
-                f.lower().endswith(".tex") and (vdir / f).stat().st_size == 0
-                for f in res.files
-                if f.lower().endswith(".tex")
-            ):
-                log.warning(
-                    "%sv%d: all %d .tex file(s) are empty, marking as no_tex",
-                    arxiv_id,
-                    version,
-                    len(empty_tex),
-                )
-                rec["empty_tex_files"] = empty_tex
-                return {**rec, "status": "no_tex", "total_s": _since(start)}
+        # A source whose .tex files are all 0 bytes has no usable TeX: record it as
+        # no_tex (final, never sent to the parser) and leave vN/ empty, as for a PDF.
+        tex = [f for f in res.files if f.lower().endswith(".tex")]
+        if tex and all((vdir / f).stat().st_size == 0 for f in tex):
+            log.warning("%sv%d: all %d .tex file(s) are empty", arxiv_id, version, len(tex))
+            shutil.rmtree(vdir)
+            vdir.mkdir()
+            rec.update(files=[], bytes_after=0, empty_tex_files=tex)
+            return {**rec, "status": "no_tex", "total_s": _since(start)}
         return {**rec, "status": "ok" if res.has_tex else "no_tex", "total_s": _since(start)}
 
     shutil.rmtree(vdir, ignore_errors=True)

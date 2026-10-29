@@ -180,6 +180,23 @@ def test_gzipped_html_submission_is_an_empty_record_not_a_failure(tmp_path):
     assert list((tmp_path / "corpus" / "2606-00001" / "v1").iterdir()) == []
 
 
+def test_source_with_only_empty_tex_is_an_empty_record(tmp_path):
+    body = tar_bytes({"main.tex": b"", "refs.bib": b"@misc{a}"})
+    fake = FakeArxiv(src_body={"2606.00001v1": (body, "arXiv-2606.00001v1.tar.gz")})
+    summary = crawl(tmp_path, fake)
+    assert summary["version_status"] == {"ok": 2, "no_tex": 2}
+    assert list((tmp_path / "corpus" / "2606-00001" / "v1").iterdir()) == []
+    rec = load_version_state(tmp_path / "work" / "versions.jsonl")[("2606.00001", 1)]
+    assert rec["files"] == [] and rec["empty_tex_files"] == ["main.tex"]
+
+
+def test_versions_log_keeps_one_record_per_version(tmp_path):
+    crawl(tmp_path, FakeArxiv(src_status={"2606.00002v2": 503}))
+    crawl(tmp_path, FakeArxiv())
+    lines = (tmp_path / "work" / "versions.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 4  # the failed then retried 2606.00002v2 is stored once
+
+
 def test_missing_source_is_an_empty_record(tmp_path):
     summary = crawl(tmp_path, FakeArxiv(src_status={"2606.00001v1": 404}))
     assert summary["version_status"]["unavailable"] == 1
