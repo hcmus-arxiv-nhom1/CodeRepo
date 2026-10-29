@@ -47,3 +47,6 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- uv: dependencies live in src/requirements.txt, no project lock ---
+uv.lock

@@ -187,6 +187,12 @@ def test_stats_report_calls_and_the_smallest_gap(coordinator):
     assert stats["min_gap_s"] >= INTERVAL * 0.8
 
 
+def test_interval_never_goes_below_the_startup_pace(coordinator):
+    limiter, url = coordinator
+    RemoteRateLimiter(url, "a").set_min_interval(INTERVAL / 10)
+    assert limiter.min_interval_s == INTERVAL
+
+
 def test_coordinator_refuses_a_pace_below_the_terms_of_use():
     with pytest.raises(ValueError):
         check_min_interval(0.5)
