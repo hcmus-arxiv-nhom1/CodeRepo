@@ -124,6 +124,14 @@ def test_failed_batch_is_retried_once_in_the_same_run(tmp_path):
     assert counts["ok"] == 1 and counts["failed"] == 0
 
 
+def test_s2_down_stops_after_three_failed_batches_in_a_row(tmp_path):
+    ids = [f"2606.{n:05d}" for n in range(1, 11)]
+    fake = FakeS2({}, fail_first=999)
+    counts = crawl(ids, tmp_path, client=client_for(fake), batch_size=1, max_batch_retries=0)
+    assert counts["failed"] == 10
+    assert len(fake.calls) == 3 * 5  # 3 batches x 5 attempts, the other 7 never sent
+
+
 def test_long_reference_list_uses_the_paginated_endpoint(tmp_path, monkeypatch):
     monkeypatch.setattr(refs_mod, "NESTED_REFERENCE_CAP", 3)
     monkeypatch.setattr(refs_mod, "PAGE_LIMIT", 2)

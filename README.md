@@ -48,19 +48,14 @@ Never commit secrets. On Colab use **Secrets** (key icon); locally use environme
 
 Open with *File → Open notebook → GitHub*, paste the repository URL, pick the notebook, then **Run all**.
 
-## Docker Compose: one crawler and scalable parser workers
+## Docker Compose: crawler workers with one global rate limiter
 
-The single-process crawler is the `single` Compose profile (`docker compose --profile single up --build`); it is the only container that calls arXiv in that mode and its local limiter stays enabled. For several crawler workers see the next section; do not run both modes at once. Parser workers consume M2 jobs from Redis Streams and share the corpus/output volumes. To scale parsing to ten workers:
+The official crawl and the M1 benchmark run on Colab (above). Compose is an optional local setup; in it, **every** arXiv request goes through the `coordinator`, so there is never a second arXiv client next to it. Never run `python -m src.run_pipeline` against arXiv while the Compose cluster is up: it has its own local limiter. Parser workers consume M2 jobs from Redis Streams (`--scale parser-worker=10`). Redis AOF persistence is enabled; `docker compose down -v` removes the volumes.
 
 ```bash
-Copy-Item .env.example .env  # PowerShell; use `cp` in Bash
-# Set ARXIV_CONTACT_EMAIL before starting a live crawl.
-docker compose up --build --scale parser-worker=10
+Copy-Item .env.example .env  # PowerShell; use `cp` in Bash. Set ARXIV_CONTACT_EMAIL first.
 ```
 
-The default trial uses the first 100 IDs of `thien` and Docker-managed volumes. Set `QUEUE_SEED=10` or `20` to control the initial scheduling batch. Redis AOF persistence is enabled. `docker compose down` retains named volumes; `docker compose down -v` removes them.
-
-## Docker Compose: crawler workers with one global rate limiter
 
 Three services share one arXiv pace of at least 3 s between request starts, one request in flight:
 

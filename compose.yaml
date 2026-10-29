@@ -103,43 +103,6 @@ services:
         condition: service_healthy
     restart: "no"
 
-  crawler:
-    profiles: ["single"]
-    build: .
-    command:
-      - python
-      - -m
-      - src.run_pipeline
-      - --range
-      - ${CRAWL_RANGE:-thien}
-      - --offset
-      - ${CRAWL_OFFSET:-0}
-      - --limit
-      - ${CRAWL_LIMIT:-100}
-      - --redis-url
-      - redis://redis:6379/0
-      - --queue-seed
-      - ${QUEUE_SEED:-10}
-      - --queue-high-watermark
-      - ${QUEUE_HIGH_WATERMARK:-100}
-      - --queue-max-prefetch
-      - ${QUEUE_MAX_PREFETCH:-200}
-      - --data-root
-      - /data/corpus
-      - --work-dir
-      - /data/work
-      - --no-progress
-    environment:
-      ARXIV_CONTACT_EMAIL: ${ARXIV_CONTACT_EMAIL:-}
-    volumes:
-      - ${CORPUS_HOST_PATH:-./data/corpus}:/data/corpus
-      - ${WORK_HOST_PATH:-./work}:/data/work
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: "no"
-    deploy:
-      replicas: 1
 
   parser-worker:
     build: .

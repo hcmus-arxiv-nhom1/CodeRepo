@@ -50,6 +50,7 @@ NESTED_REFERENCE_CAP = 1000  # assumed cap of nested lists, see spec 0001
 PAGE_LIMIT = 1000
 FINAL_STATUSES = frozenset({"ok", "not_found"})
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+MAX_CONSECUTIVE_FAILED_BATCHES = 3  # S2 looks down: stop this round, retry next run
 
 
 class S2Error(Exception):
@@ -224,13 +225,20 @@ def crawl(
         if attempt and pending:
             log.info("references: retry round %d for %d batch(es)", attempt, len(pending))
         failed_batches: list[list[str]] = []
-        for batch in pending:
+        in_a_row = 0
+        for k, batch in enumerate(pending):
             try:
                 papers = client.batch(batch)
             except S2Error as exc:
                 log.error("references: batch of %d failed (%s)", len(batch), exc)
                 failed_batches.append(batch)
+                in_a_row += 1
+                if in_a_row >= MAX_CONSECUTIVE_FAILED_BATCHES:
+                    log.error("references: %d batches failed in a row, S2 looks down", in_a_row)
+                    failed_batches += pending[k + 1 :]
+                    break
                 continue
+            in_a_row = 0
             for arxiv_id, paper in zip(batch, papers, strict=True):
                 refs = (paper or {}).get("references") or []
                 if paper is not None and len(refs) >= NESTED_REFERENCE_CAP:
@@ -246,7 +254,8 @@ def crawl(
                 counts["references"] += record["num_references"]
                 counts["arxiv_references"] += record["num_arxiv_references"]
         pending = failed_batches
-    counts["failed"] += sum(len(b) for b in pending)  # still failing: retried next run
+    # still failing: retried next run; `validate --require-references` lists them
+    counts["failed"] += sum(len(b) for b in pending)
     counts.update(
         papers=len(arxiv_ids),
         skipped=len(arxiv_ids) - len(todo),
