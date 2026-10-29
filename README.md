@@ -48,6 +48,35 @@ Never commit secrets. On Colab use **Secrets** (key icon); locally use environme
 
 Open with *File → Open notebook → GitHub*, paste the repository URL, pick the notebook, then **Run all**.
 
+## Docker Compose: one crawler and scalable parser workers
+
+The single-process crawler is the `single` Compose profile (`docker compose --profile single up --build`); it is the only container that calls arXiv in that mode and its local limiter stays enabled. For several crawler workers see the next section; do not run both modes at once. Parser workers consume M2 jobs from Redis Streams and share the corpus/output volumes. To scale parsing to ten workers:
+
+```bash
+Copy-Item .env.example .env  # PowerShell; use `cp` in Bash
+# Set ARXIV_CONTACT_EMAIL before starting a live crawl.
+docker compose up --build --scale parser-worker=10
+```
+
+The default trial uses the first 100 IDs of `thien` and Docker-managed volumes. Set `QUEUE_SEED=10` or `20` to control the initial scheduling batch. Redis AOF persistence is enabled. `docker compose down` retains named volumes; `docker compose down -v` removes them.
+
+## Docker Compose: crawler workers with one global rate limiter
+
+Three services share one arXiv pace of at least 3 s between request starts, one request in flight:
+
+- `coordinator`: the only place that decides when an arXiv request may start. Run exactly one instance; never scale it. A worker that stops renewing its lease (container killed) loses the turn after `LEASE_TTL_S` seconds.
+- `crawler-worker`: takes download jobs from the Redis stream `download-jobs` and hands `ok` versions to the parser stream. Count set by `CRAWLER_WORKERS` (default 3), or `--scale crawler-worker=N`.
+- `crawler-producer`: discovers metadata for the ID range, publishes one job per missing version, waits for the queue to drain and writes `work/run_summary.json` and `work/failed.csv`.
+
+```bash
+docker compose up -d --build redis coordinator crawler-worker parser-worker
+docker compose run --rm crawler-producer  # CRAWL_RANGE, CRAWL_OFFSET, CRAWL_LIMIT in .env pick the IDs
+```
+
+More workers never raise the arXiv request rate; they only keep the lane busy while other work (extraction, disk) happens and let the crawl continue when a worker dies. `run_summary.json` reports the achieved `coordinator.min_gap_s`, `dead_letter` and `papers_complete`. Jobs failing `MAX_ATTEMPTS` times land in the stream `download-jobs:dead`; jobs are deduplicated by id, so to retry one delete its key first: `DEL download-jobs:job:<job_id>`.
+
+The producer discovers metadata in chunks whose size follows the queued work (download-jobs plus parser-jobs): 5 IDs while the queues are empty, up to 100 once they hold 100 jobs (`DISCOVERY_TIERS`, `DISCOVERY_BACKLOG_STEPS`). A chunk that arXiv rejects lowers the size for `DISCOVERY_COOLDOWN_ROUNDS` rounds. IDs that already have `metadata.json` cost no request. `run_summary.json` reports `time_to_first_job_s`, `discovery_api_requests`, `discovery_oai_fallbacks` and `discovery_tier_history`.
+
 ## Crawler (M1)
 
 Run from the repository root.

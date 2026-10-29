@@ -36,7 +36,8 @@ class DownloadOutcome:
     content_type: str | None = None
     filename: str | None = None  # from Content-Disposition, e.g. arXiv-2606.32040v1.tar.gz
     nbytes: int = 0  # body bytes actually received (less than the archive for PDF-only)
-    elapsed_s: float = 0.0  # download + extraction, which overlap
+    elapsed_s: float = 0.0  # transfer + streamed extraction, which overlap
+    wait_s: float = 0.0  # rate-limiter wait, including Range resumes
     attempts: int = 0
     resumes: int = 0
     reason: str | None = None
@@ -89,6 +90,7 @@ def download_version(
         "filename": filename,
         "nbytes": res.nbytes,
         "elapsed_s": res.elapsed_s,
+        "wait_s": res.wait_s,
         "attempts": res.attempts,
         "resumes": res.resumes,
     }

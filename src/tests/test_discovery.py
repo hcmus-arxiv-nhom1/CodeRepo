@@ -172,6 +172,8 @@ def test_discover_resolves_versions_and_writes_metadata(tmp_path):
     # base batch, one retry for the missing ID, one versioned batch, one OAI lookup
     assert len(calls) == 4
     assert {r["status"] for r in journal} == {"found", "missing"}
+    assert res.oai_fallbacks == 1  # 2606.00003 was not returned by the API
+    assert res.api_failed_batches == 0
 
 
 def test_discover_survives_malformed_api_response(tmp_path):
@@ -196,3 +198,18 @@ def test_discover_skips_ids_with_metadata(tmp_path):
     res = discover(["2606.00001", "2606.00002"], client, tmp_path)
     assert res.found == {"2606.00001": 1, "2606.00002": 3}
     assert calls == []
+
+
+def test_discover_counts_a_failed_api_batch(tmp_path):
+    calls = []
+    good = arxiv_handler(calls)
+
+    def handler(url):
+        if not calls:  # first batch fails: feed cut mid-body
+            calls.append(url)
+            return FakeResponse(200, b'<?xml version="1.0"?><feed><entry><id>http://arx')
+        return good(url)
+
+    res = discover(["2606.00001"], make_client(handler), tmp_path)
+    assert res.api_failed_batches == 1
+    assert res.oai_fallbacks == 0

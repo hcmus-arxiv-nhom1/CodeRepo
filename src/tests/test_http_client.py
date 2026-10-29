@@ -19,6 +19,19 @@ def scripted(responses, clock, starts):
     return handler
 
 
+def test_fetch_result_reports_rate_limiter_wait_separately():
+    clock, starts = FakeClock(), []
+    client = make_client(
+        scripted([FakeResponse(200, b"first"), FakeResponse(200, b"second")], clock, starts),
+        clock,
+    )
+    client.get("https://export.arxiv.org/first")
+    result = client.get("https://export.arxiv.org/second")
+
+    assert result.wait_s == 3.0
+    assert result.elapsed_s < 0.1
+
+
 def test_retry_after_is_honoured():
     clock, starts = FakeClock(), []
     client = make_client(
@@ -167,6 +180,46 @@ def test_wrong_content_range_restarts_from_zero():
     ]
     client = make_client(scripted(responses, clock, starts), clock)
     assert client.stream("https://export.arxiv.org/src/u", read_all).value == b"abcdef"
+
+
+def test_resume_rejected_with_429_waits_and_retries_the_same_range():
+    """A 429 on the Range request must not throw away the bytes already received."""
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [
+        FakeResponse(200, b"abcdefgh", headers={"Content-Length": "8"}, fail_midway=cut),
+        FakeResponse(429, headers={"Retry-After": "10"}),
+        FakeResponse(206, b"efgh", headers={"Content-Range": "bytes 4-7/8"}),
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    res = client.stream("https://export.arxiv.org/src/r", read_all)
+    assert res.value == b"abcdefgh" and res.attempts == 1  # no restart from byte 0
+    assert [h.get("Range") for h in client.session.sent_headers] == [None, "bytes=4-", "bytes=4-"]
+    assert starts == [0.0, 3.0, 13.0]  # Retry-After honoured after the rejected resume
+
+
+def test_resume_rejected_with_503_backs_off_and_retries():
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [
+        FakeResponse(200, b"abcdefgh", headers={"Content-Length": "8"}, fail_midway=cut),
+        FakeResponse(503),
+        FakeResponse(206, b"efgh", headers={"Content-Range": "bytes 4-7/8"}),
+    ]
+    client = make_client(scripted(responses, clock, starts), clock)
+    res = client.stream("https://export.arxiv.org/src/s", read_all)
+    assert res.value == b"abcdefgh" and res.attempts == 1
+
+
+def test_resume_gives_up_after_repeated_rejections_and_restarts():
+    clock, starts = FakeClock(), []
+    cut = requests.exceptions.ChunkedEncodingError("cut")
+    responses = [FakeResponse(200, b"abcdefgh", headers={"Content-Length": "8"}, fail_midway=cut)]
+    responses += [FakeResponse(429, headers={"Retry-After": "1"}) for _ in range(3)]
+    responses += [FakeResponse(200, b"abcdefgh", headers={"Content-Length": "8"})]
+    client = make_client(scripted(responses, clock, starts), clock)
+    res = client.stream("https://export.arxiv.org/src/q", read_all)
+    assert res.value == b"abcdefgh" and res.attempts == 2
 
 
 def test_consumer_errors_propagate():

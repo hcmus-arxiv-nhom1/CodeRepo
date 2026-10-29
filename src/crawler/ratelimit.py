@@ -46,6 +46,8 @@ class RateLimiter:
         self.calls = 0
         self.last_gap_s: float | None = None  # gap between the starts of the last two calls
         self.min_gap_s: float | None = None  # smallest observed gap between call starts
+        self.wait_s = 0.0  # cumulative time spent waiting for the limiter
+        self.last_wait_s = 0.0
 
     def __enter__(self) -> RateLimiter:
         self._lock.acquire()
@@ -60,10 +62,12 @@ class RateLimiter:
         self._lock.release()
 
     def _wait_turn(self) -> None:
-        delay = self._next_start - self._clock()
-        if delay > 0:
+        wait_started = self._clock()
+        while (delay := self._next_start - self._clock()) > 0:
             self._sleep(delay)
         now = self._clock()
+        self.last_wait_s = now - wait_started
+        self.wait_s += self.last_wait_s
         if self._last_start is not None:
             gap = now - self._last_start
             self.last_gap_s = gap

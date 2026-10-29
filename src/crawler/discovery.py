@@ -82,6 +82,8 @@ class DiscoveryResult:
     found: dict[str, int] = field(default_factory=dict)  # arxiv_id -> num_versions
     missing: dict[str, str] = field(default_factory=dict)  # arxiv_id -> reason
     elapsed_s: float = 0.0
+    api_failed_batches: int = 0  # API batches that raised (429 after retries, cut feed, ...)
+    oai_fallbacks: int = 0  # OAI-PMH GetRecord lookups for IDs the API did not resolve
 
 
 # --------------------------------------------------------------------------- parsing
@@ -302,6 +304,7 @@ def discover(
             try:
                 entries.update((e.arxiv_id, e) for e in api_query(client, batch))
             except (FetchError, etree.XMLSyntaxError) as exc:  # e.g. feed cut mid-body
+                result.api_failed_batches += 1
                 log.error("discovery: API batch failed (%s)", exc)
         if attempt == 1 and len(entries) < len(todo):
             log.warning("discovery: API missed %d IDs, retrying once", len(todo) - len(entries))
@@ -329,6 +332,7 @@ def discover(
                     dates[e.arxiv_id][e.version] = e.updated
                     per_version[e.arxiv_id][e.version] = e
         except (FetchError, etree.XMLSyntaxError) as exc:
+            result.api_failed_batches += 1
             log.error("discovery: versioned API batch failed (%s)", exc)
     for arxiv_id, e in entries.items():
         dates[arxiv_id][1] = e.published  # keep v1 = published even after the v1 query
@@ -337,6 +341,7 @@ def discover(
     oai: dict[str, dict] = {}
     incomplete = [i for i, e in entries.items() if len(dates[i]) != e.version]
     for arxiv_id in [i for i in todo if i not in entries] + incomplete:
+        result.oai_fallbacks += 1
         try:
             rec = oai_get_record(client, arxiv_id)
         except (FetchError, ValueError, etree.XMLSyntaxError) as exc:

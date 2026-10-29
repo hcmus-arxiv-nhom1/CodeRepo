@@ -103,9 +103,13 @@ def test_end_to_end_layout_and_summary(tmp_path):
     assert list((corpus / "2606-00003" / "v1").iterdir()) == []  # PDF-only: empty record
     assert summary["papers_complete"] == 3 and summary["paper_success_rate"] == 1.0
     assert summary["version_status"] == {"ok": 3, "no_tex": 1}
+    assert summary["mean_limiter_wait_s"] == 0.0
+    assert summary["mean_transfer_extract_s"] > 0.0
+    assert summary["mean_download_s"] == summary["mean_transfer_extract_s"]
     assert summary["failed_rows"] == 0
     assert not (tmp_path / "work" / "tmp").exists()
     state = load_version_state(tmp_path / "work" / "versions.jsonl")
+    assert all("limiter_wait_s" in rec for rec in state.values())
     assert state[("2606.00001", 1)]["dropped"] == {".png": {"files": 1, "bytes": len(PNG)}}
 
 
