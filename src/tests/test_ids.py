@@ -1,6 +1,7 @@
 # Drafted with the help of an AI assistant (Claude, Anthropic), cited per the course rules.
 import pytest
 
+from src import config
 from src.utils.ids import (
     from_folder_name,
     is_new_style,
@@ -51,3 +52,12 @@ def test_range_crossing_year_border():
 def test_range_missing_month_end_raises():
     with pytest.raises(KeyError):
         list(iter_id_range("2606.30734", "2607.03693", {}))
+
+
+def test_assigned_ranges_hold_5000_ids_each_and_never_overlap():
+    seen: set[str] = set()
+    for start, end in config.RANGES.values():
+        ids = set(iter_id_range(start, end, config.MONTH_END))
+        assert len(ids) == 5000
+        assert not ids & seen  # an ID in two ranges would be crawled twice
+        seen |= ids

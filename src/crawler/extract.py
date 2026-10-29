@@ -52,6 +52,7 @@ _WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
 _WINDOWS_BAD_CHARS = set('<>:"|?*')
 _GZIP_ERRORS = (gzip.BadGzipFile, EOFError, zlib.error)
 _CHUNK = 1 << 16
+MAX_ZIP_SPOOL_BYTES = 2 << 30  # a zip must be spooled to disk; refuse anything above 2 GiB
 
 
 class CorruptArchiveError(Exception):
@@ -385,8 +386,11 @@ def extract_stream(
     elif res.kind == "zip":  # the central directory is at the end: spool to disk (rare)
         spool = out_dir.parent / f".{out_dir.name}.zip.part"
         try:
-            with open(spool, "wb") as fh:
-                fh.write(src.read())
+            with open(spool, "wb") as fh:  # in chunks: never the whole archive in RAM
+                while chunk := src.read(_CHUNK):
+                    fh.write(chunk)
+                    if fh.tell() > MAX_ZIP_SPOOL_BYTES:
+                        raise CorruptArchiveError(f"zip larger than {MAX_ZIP_SPOOL_BYTES} bytes")
             _extract_zip(spool, out_dir, keep, res)
         finally:
             spool.unlink(missing_ok=True)
