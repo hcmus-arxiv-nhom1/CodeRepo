@@ -11,7 +11,7 @@
 
 ## Environment
 
-- **Python 3.12**, the version of the Google Colab runtime. Every package is pinned in `src/requirements.txt`; development tools (pytest, ruff, pre-commit) are in `src/requirements-dev.txt`.
+- **Python 3.12 or 3.13**: Google Colab runs 3.13 (checked 30/10/2026). `src/requirements.txt` gives version ranges that match the packages Colab already has, so the notebooks install with `pip --no-deps`; development tools (pytest, ruff, pre-commit) are in `src/requirements-dev.txt`.
 - No GPU needed. The official benchmark runs on **Google Colab, CPU-only**.
 
 ```bash
@@ -46,7 +46,11 @@ Never commit secrets. On Colab use **Secrets** (key icon); locally use environme
 | [`src/notebooks/colab_crawl.ipynb`](src/notebooks/colab_crawl.ipynb) | The official crawl of the 4 ranges by **one** instance, in shifts. It is also the M1 benchmark: every chunk of 500 IDs runs under `/usr/bin/time -v` and the profiler. Syncs Google Drive after every chunk; a `SHIFT.json` marker on Drive prevents two shifts at once |
 | [`src/notebooks/colab_benchmark.ipynb`](src/notebooks/colab_benchmark.ipynb) | Re-run the measurement from a fresh CPU-only runtime (a whole range or a sample), print every performance figure and export the CSV files for the book |
 
-Open with *File → Open notebook → GitHub*, paste the repository URL, pick the notebook, then **Run all**.
+Open a notebook straight in the browser (no VS Code extension needed), pick *Runtime → Change runtime type → CPU*, then **Run all**:
+
+[![Crawl in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/hcmus-arxiv-nhom1/CodeRepo/blob/main/src/notebooks/colab_crawl.ipynb) `colab_crawl.ipynb` · [![Benchmark in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/hcmus-arxiv-nhom1/CodeRepo/blob/main/src/notebooks/colab_benchmark.ipynb) `colab_benchmark.ipynb`
+
+Colab opens the copy on `main`; *File → Save a copy in Drive* keeps your own edits (`SHIFT_OWNER`, `LIMIT`). Grant access when the notebook asks for Google Drive and for the Colab Secrets `S2_API_KEY` / `ARXIV_CONTACT_EMAIL`.
 
 ## Docker Compose: crawler workers with one global rate limiter
 
