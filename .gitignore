@@ -27,7 +27,6 @@ arXiv Project*.md
 
 # --- Secrets ---
 .env
-secrets.env
 kaggle.json
 *.key
 
