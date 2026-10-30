@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -411,9 +412,12 @@ def run(
     label: str | None = None,
     job_queue: RedisJobQueue | None = None,
     scheduler: AdaptiveBatchScheduler | None = None,
+    on_version: Callable[[dict], None] | None = None,
 ) -> dict:
     """Discover ``ids``, then download and extract every version not done yet."""
     if scheduler is not None and job_queue is not None:
+        if on_version is not None:
+            raise ValueError("Version checkpoint callback requires non-queue benchmark mode")
         return _run_queued_batches(
             ids,
             data_root=data_root,
@@ -495,6 +499,8 @@ def run(
             ver_log.write(rec)
             state[(arxiv_id, version)] = rec
             processed.append(rec)
+            if on_version is not None:
+                on_version(rec)  # after extraction and the flushed/fsynced journal record
             if job_queue is not None and rec.get("status") == "ok":
                 _publish_parser_job(job_queue, data_root, arxiv_id, version)
             if rec["status"] == "failed":
