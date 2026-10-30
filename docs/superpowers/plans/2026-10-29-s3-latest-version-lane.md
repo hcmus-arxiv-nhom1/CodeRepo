@@ -76,7 +76,7 @@ Same package `2606_041`, range `hieu` (115 papers in the package), TAR read from
 
 ## 5d. Phase 3 result (29/10/2026, notebook `src/notebooks/colab_m1_s3.ipynb`)
 
-One orchestrating notebook, repo untouched (read-only imports of `discover`, `process_version`, `extract_stream`, `references.crawl`, `summarize`). Tested locally on a 30-ID slice of `hieu` (42 versions, 1 package read from a local copy):
+One orchestrating notebook, repo untouched (read-only imports of `process_version`, `extract_stream`, `summarize`, `S2Client`, `stats`; since the later revision, discovery uses `arxiv.py` 4.x and references use the per-paper Semantic Scholar endpoint, see `s3_colab_guide.md`). Tested locally on a 30-ID slice of `hieu` (42 versions, 1 package read from a local copy):
 
 - `PLAN_ONLY` on the four ranges: **20,000 IDs, 144 packages, 76.7 GB, ~$6.90** list price; per-month last sequence number comes from the S3 manifest (`2606` → 32040, equal to the value in the `iter_id_range` docstring), so the month border of Thiên's range is resolved without guessing.
 - Run 1 with `MAX_ARXIV_VERSIONS=4`: S3 lane extracted 25 versions (MD5 of the package checked), the arXiv lane stopped cleanly after 4 versions (`budget_hit`), 13 pending.
