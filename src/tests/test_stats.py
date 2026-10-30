@@ -184,3 +184,16 @@ def test_stats_reports_the_time_spent_waiting_between_retries(tmp_path):
     assert stats.backoff_seconds([work]) == (906.2, 3)
     rows = stats.benchmark_rows({"chunks": 1, "wall_s": 1000.0}, None, 10, (906.2, 3))
     assert {r["metric"]: r["value"] for r in rows}["retry_backoff_wait"] == 906.2
+
+
+def test_checkpoint_seconds_separates_included_time_and_deduplicates(tmp_path):
+    from src.analysis.stats import checkpoint_seconds
+
+    events = [
+        dict(generation="a", seconds=2, included_in_pipeline=True),
+        dict(generation="b", seconds=3, included_in_pipeline=False),
+    ]
+    (tmp_path / "checkpoint_events.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events + events)
+    )
+    assert checkpoint_seconds([tmp_path]) == (2, 3)

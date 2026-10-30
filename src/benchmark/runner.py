@@ -4,6 +4,8 @@ The parent owns the shift and profiles each child. Children checkpoint only at
 completed-version boundaries, within the profiler's measured process tree.
 """
 
+# Drafted with assistance from OpenAI Codex, disclosed per course rules.
+
 from __future__ import annotations
 
 import argparse
@@ -205,20 +207,8 @@ def run_child(payload: dict) -> None:
         if time.monotonic() - last < payload["checkpoint_s"]:
             return
         t0 = time.perf_counter()
-        rec = cp.save(payload["ids"])
+        rec = cp.save(payload["ids"], phase="periodic", included_in_pipeline=True)
         elapsed = time.perf_counter() - t0
-        with (local / "work/checkpoint_events.jsonl").open("a", encoding="utf-8") as fh:
-            fh.write(
-                json.dumps(
-                    dict(
-                        generation=rec["generation"],
-                        seconds=elapsed,
-                        bytes=rec["bytes"],
-                        versions=rec["versions"],
-                    )
-                )
-                + "\n"
-            )
         print(f"Checkpoint verified: {rec['versions']} versions, {elapsed:.1f}s", flush=True)
         last = time.monotonic()
 
@@ -327,7 +317,7 @@ def run_benchmark(
         chunks = plan_chunks(cfg)
         all_ids = [i for c in chunks for i in c.ids]
         # Initial durable manifest/session, even if discovery never succeeds.
-        cp.save([])
+        cp.save([], phase="initial")
         last_exit = None
         for chunk in chunks:
             shift.check()
@@ -354,6 +344,19 @@ def run_benchmark(
             )
             payload_path = work / "chunk.json"
             write_json(payload_path, payload)
+            write_json(
+                prof / "attempt.json",
+                dict(
+                    attempt=attempt,
+                    owner=chunk.owner,
+                    ids=list(chunk.ids),
+                    planned_at=datetime.now(UTC).isoformat(),
+                    state="launch-intent",
+                ),
+            )
+            # Durable intent BEFORE Popen: even a kill before first periodic save
+            # must leave evidence of an attempt with potentially missing runtime.
+            Checkpoints(local, remote).save(list(chunk.ids), phase="prelaunch")
             cmd = [
                 sys.executable,
                 "-m",
@@ -383,24 +386,32 @@ def run_benchmark(
                     time.sleep(1)
             except BaseException:
                 # Stop the entire profiler/crawler process tree before checkpointing.
-                process = psutil.Process(child.pid)
-                processes = process.children(recursive=True) + [process]
-                for proc in processes:
-                    try:
-                        proc.terminate()
-                    except psutil.NoSuchProcess:
-                        pass
-                _, alive = psutil.wait_procs(processes, timeout=10)
-                for proc in alive:
-                    proc.kill()
-                child.wait()
+                try:
+                    process = psutil.Process(child.pid)
+                    processes = process.children(recursive=True) + [process]
+                    for proc in processes:
+                        try:
+                            proc.terminate()
+                        except psutil.NoSuchProcess:
+                            pass
+                    _, alive = psutil.wait_procs(processes, timeout=10)
+                    for proc in alive:
+                        try:
+                            proc.kill()
+                        except psutil.NoSuchProcess:
+                            pass
+                except psutil.NoSuchProcess:
+                    pass
+                finally:
+                    child.wait()
+                    child = None
                 raise
             last_exit = time.monotonic()
             code, child = child.returncode, None
             # Child may have published periodic checkpoints; refresh the parent index.
             cp = Checkpoints(local, remote)
             sync_start = time.perf_counter()
-            checkpoint = cp.save(list(chunk.ids))
+            checkpoint = cp.save(list(chunk.ids), phase="post-chunk")
             sync_s = time.perf_counter() - sync_start
             with (work / "attempts.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(
@@ -425,26 +436,32 @@ def run_benchmark(
         result["final_complete"] = result["final_complete"] and result["timing_complete"]
         write_json(work / "coverage.json", result)
         export_evidence(cfg, local)
-        write_json(
-            work / f"session_totals/{session_id}.json",
-            dict(
-                elapsed_before_final_checkpoint_s=time.perf_counter() - session_start,
-                coverage=result,
-            ),
-        )
-        cp.save(all_ids)
+        cp.save(all_ids, phase="final-reports")
         safe_to_release = True
         return result
     finally:
         # A hard runtime loss cannot execute this block: only verified checkpoints survive.
         if child is None and local.is_dir() and (local / "work/manifest.json").exists():
             try:
-                Checkpoints(local, remote).save([i for c in plan_chunks(cfg) for i in c.ids])
+                Checkpoints(local, remote).save(
+                    [i for c in plan_chunks(cfg) for i in c.ids], phase="final"
+                )
                 safe_to_release = True
             except Exception:
                 logging.exception("Final checkpoint failed; shift kept active")
                 safe_to_release = False
         shift.close(release=safe_to_release)
+        if (local / "work/manifest.json").exists() and "session_id" in locals():
+            session = dict(
+                seconds_through_final_sync=time.perf_counter() - session_start,
+                shift_released=safe_to_release,
+                ended_at=datetime.now(UTC).isoformat(),
+            )
+            write_json(local / f"work/session_totals/{session_id}.json", session)
+            if safe_to_release:
+                write_json(remote / f"sessions/{session_id}.json", session)
+            # Include the last checkpoint event and session total in the downloadable ZIP.
+            export_evidence(cfg, local)
 
 
 if __name__ == "__main__":

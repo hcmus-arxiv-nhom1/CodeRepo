@@ -166,6 +166,29 @@ def backoff_seconds(work_dirs: list[Path]) -> tuple[float, int] | None:
     return (round(total, 1), waits) if seen else None
 
 
+def checkpoint_seconds(work_dirs: list[Path]) -> tuple[float, float]:
+    """Diagnostic components: periodic (already in wall time), external sync (additional)."""
+    events = {}
+    for work in work_dirs:
+        path = work / "checkpoint_events.jsonl"
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    event = json.loads(line)
+                    events[event["generation"]] = event
+                except (ValueError, KeyError):
+                    continue
+    return tuple(
+        round(
+            sum(
+                e["seconds"] for e in events.values() if bool(e["included_in_pipeline"]) == included
+            ),
+            3,
+        )
+        for included in (True, False)
+    )
+
+
 def references_rows(ids: list[str], rows: list[dict], work_dirs: list[Path]) -> list[dict]:
     discovery = load_discovery(work_dirs)
     counts = request_counts(work_dirs)
@@ -372,6 +395,23 @@ def main(argv: list[str] | None = None) -> int:
         agg, samples = aggregate_profiles(dirs, args.time_log)
         bench = benchmark_rows(
             agg, discovery_seconds(work_dirs), len(ids), backoff_seconds(work_dirs)
+        )
+        periodic, external = checkpoint_seconds(work_dirs)
+        bench.extend(
+            [
+                dict(
+                    metric="checkpoint_periodic_time",
+                    value=periodic,
+                    unit="s",
+                    tool="checkpoint_events.jsonl; already included in pipeline wall time",
+                ),
+                dict(
+                    metric="checkpoint_external_time",
+                    value=external,
+                    unit="s",
+                    tool="checkpoint_events.jsonl; additional sync outside pipeline profiles",
+                ),
+            ]
         )
         write_csv(args.out / "benchmark_summary.csv", bench)
         write_csv(args.out / "resource_timeseries.csv", samples)

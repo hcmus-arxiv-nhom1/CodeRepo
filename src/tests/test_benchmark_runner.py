@@ -139,6 +139,30 @@ def test_restore_rejects_unsafe_archive_path():
     assert Checkpoints.safe_name("data/corpus/a/v1/main.tex")
 
 
+def test_checkpoint_spool_is_inside_measured_work_tree(tmp_path, monkeypatch):
+    import src.benchmark.checkpoints as module
+
+    local, remote = tmp_path / "local", tmp_path / "remote"
+    seed_version(local)
+    original = module.shutil.copyfile
+
+    def copy(source, destination):
+        assert Path(source).is_relative_to(local / "work")
+        return original(source, destination)
+
+    monkeypatch.setattr(module.shutil, "copyfile", copy)
+    Checkpoints(local, remote).save(["2604.20535"])
+
+
+def test_all_checkpoint_phases_have_durable_duration_events(tmp_path):
+    local, remote = tmp_path / "local", tmp_path / "remote"
+    seed_version(local)
+    rec = Checkpoints(local, remote).save(["2604.20535"], phase="final")
+    event = json.loads((remote / "checkpoint-events" / (rec["generation"] + ".json")).read_text())
+    assert event["seconds"] >= 0 and event["phase"] == "final"
+    assert not event["included_in_pipeline"]
+
+
 def test_timing_audit_does_not_hide_lost_profile_summary(tmp_path):
     from src.benchmark.runner import timing_audit
 
@@ -184,8 +208,12 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(tmp_path, 
     class FinishedProcess:
         def __init__(self, command, **kwargs):
             payload = json.loads(Path(command[-1]).read_text())
-            runner.run_child(payload)
             profile = Path(command[command.index("--out") + 1])
+            before_launch = tmp_path / "before-launch"
+            Checkpoints(before_launch, drive / "runs/smoke").restore()
+            assert (before_launch / "work/profile" / profile.name / "attempt.json").is_file()
+            assert not runner.timing_audit(before_launch)["timing_complete"]
+            runner.run_child(payload)
             (profile / "profile_summary.json").write_text(
                 json.dumps(
                     dict(

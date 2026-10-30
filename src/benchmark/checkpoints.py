@@ -1,10 +1,13 @@
 """Verified, append-only Drive checkpoints. No live extraction directory is copied."""
 
+# Drafted with assistance from OpenAI Codex, disclosed per course rules.
+
 from __future__ import annotations
 
 import hashlib
 import json
 import shutil
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -107,7 +110,29 @@ class Checkpoints:
     def _verify(self, path: Path, expected: str) -> bool:
         return digest(path) == expected
 
-    def save(self, ids: list[str]) -> dict:
+    def save(
+        self, ids: list[str], *, phase: str = "checkpoint", included_in_pipeline: bool = False
+    ) -> dict:
+        started = time.perf_counter()
+        rec = self._save(ids)
+        event = dict(
+            generation=rec["generation"],
+            seconds=time.perf_counter() - started,
+            bytes=rec["bytes"],
+            versions=rec["versions"],
+            phase=phase,
+            included_in_pipeline=included_in_pipeline,
+        )
+        with (self.local / "work/checkpoint_events.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event) + "\n")
+        # Independent event records preserve final checkpoint costs after session handoff.
+        path = self.remote / "checkpoint-events" / (rec["generation"] + ".json")
+        write_json(path, event)
+        if json.loads(path.read_text(encoding="utf-8")) != event:
+            raise OSError("Checkpoint timing event could not be read back")
+        return rec
+
+    def _save(self, ids: list[str]) -> dict:
         if not self._loaded:
             records = self._records()
             head = self.local / ".checkpoint-head.json"
@@ -154,7 +179,7 @@ class Checkpoints:
         newdirs = sorted(directories - self.directories)
         files = {}
         generation = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + "-" + uuid.uuid4().hex[:8]
-        tmp = self.local / "tmp" / (generation + ".zip")
+        tmp = self.local / "work/tmp/checkpoints" / (generation + ".zip")
         tmp.parent.mkdir(parents=True, exist_ok=True)
         try:
             with ZipFile(tmp, "w", ZIP_DEFLATED) as archive:
@@ -250,4 +275,21 @@ class Checkpoints:
             if digest(self.local / name) != expected:
                 raise ValueError(f"Restored file mismatch: {name}")
         write_json(self.local / ".checkpoint-head.json", {"generation": self.parent})
+        # The latest duration event is published after its data checkpoint.
+        events = []
+        for path in sorted((self.remote / "checkpoint-events").glob("*.json")):
+            try:
+                events.append(json.loads(path.read_text(encoding="utf-8")))
+            except (ValueError, OSError):
+                continue
+        if events:
+            (self.local / "work/checkpoint_events.jsonl").write_text(
+                "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8"
+            )
+        for path in (self.remote / "sessions").glob("*.json"):
+            try:
+                session = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                continue
+            write_json(self.local / "work/session_totals" / path.name, session)
         return chain[-1]
