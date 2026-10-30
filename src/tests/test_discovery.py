@@ -213,3 +213,22 @@ def test_discover_counts_a_failed_api_batch(tmp_path):
     res = discover(["2606.00001"], make_client(handler), tmp_path)
     assert res.api_failed_batches == 1
     assert res.oai_fallbacks == 0
+
+
+def test_discover_goes_to_oai_when_the_api_keeps_refusing(tmp_path):
+    """30/10/2026 on Colab: 10 API calls and 226 s of backoff before the first OAI lookup."""
+    calls = []
+
+    def handler(url):
+        calls.append(url)
+        if "oaipmh" in url:
+            return FakeResponse(200, OAI_RECORD)
+        return FakeResponse(429)
+
+    res = discover(["2606.30762"], make_client(handler), tmp_path)
+    api = [u for u in calls if "/api/query" in u]
+    assert len(api) == 2  # DISCOVERY_API_ATTEMPTS, not 5 attempts twice
+    assert res.found == {"2606.30762": 3}
+    assert res.api_failed_batches == 1 and res.oai_fallbacks == 1
+    meta = json.loads((tmp_path / "2606-30762" / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["num_versions"] == 3 and meta["title"].startswith("Athermality")

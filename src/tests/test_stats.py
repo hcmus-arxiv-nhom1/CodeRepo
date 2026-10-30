@@ -173,3 +173,14 @@ def test_stats_aggregates_the_chunks_of_the_official_crawl(tmp_path):
     assert bench["wall_time_time_v"] == 40.0 and bench["ram_max_main_process"] == 90.0
     ts = read_csv(out / "resource_timeseries.csv")
     assert [float(r["t_sec"]) for r in ts] == [0.0, 9.0, 10.0, 39.0]  # chunk b after chunk a
+
+
+def test_stats_reports_the_time_spent_waiting_between_retries(tmp_path):
+    data, work = make_corpus(tmp_path)
+    with open(work / "run.log", "a", encoding="utf-8") as fh:
+        fh.write("2026-10-30 01:29:53 INFO backing off 2.2 s before next arXiv request\n")
+        fh.write("2026-10-30 01:29:56 INFO backing off 4.0 s before next arXiv request\n")
+        fh.write("2026-10-30 01:30:01 ERROR circuit breaker #1: pausing 900 s, pacing now 5.0 s\n")
+    assert stats.backoff_seconds([work]) == (906.2, 3)
+    rows = stats.benchmark_rows({"chunks": 1, "wall_s": 1000.0}, None, 10, (906.2, 3))
+    assert {r["metric"]: r["value"] for r in rows}["retry_backoff_wait"] == 906.2
