@@ -39,18 +39,21 @@ Never commit secrets. On Colab use **Secrets** (key icon); locally use environme
 | `ARXIV_CONTACT_EMAIL` | Group e-mail added to the User-Agent sent to arXiv |
 | `DATA_ROOT`, `WORK_DIR` | Override the defaults `data/corpus` and `work` (same as `--data-root`, `--work-dir`) |
 
-## Running on Google Colab
+## Running on Google Colab (CPU-only)
 
-| Notebook | When |
-| --- | --- |
-| [`src/notebooks/colab_crawl.ipynb`](src/notebooks/colab_crawl.ipynb) | The official crawl of the 4 ranges by **one** instance, in shifts. It is also the M1 benchmark: every chunk of 500 IDs runs under `/usr/bin/time -v` and the profiler. Syncs Google Drive after every chunk; a `SHIFT.json` marker on Drive prevents two shifts at once |
-| [`src/notebooks/colab_benchmark.ipynb`](src/notebooks/colab_benchmark.ipynb) | Re-run the measurement from a fresh CPU-only runtime (a whole range or a sample), print every performance figure and export the CSV files for the book |
+Use the single notebook [`arxiv_nhom1_crawl_benchmark.ipynb`](src/notebooks/arxiv_nhom1_crawl_benchmark.ipynb) for both sample validation and the official full crawl/benchmark. The final benchmark must cover all four assigned ranges (20,000 IDs), including every discovered version. Samples are never reported as final results.
 
-Open a notebook straight in the browser (no VS Code extension needed), pick *Runtime → Change runtime type → CPU*, then **Run all**:
+1. Use the designated group crawl account; create `MyDrive/arxiv-nhom1` once. Set `INITIALIZE_TEAM_FOLDER=True` only for its first initialization, then leave it false. Use Colab Secrets for `ARXIV_CONTACT_EMAIL` and optional `S2_API_KEY`.
+2. Choose a CPU/None runtime. Review the immutable implementation revision printed by setup and the selected ID count before running.
+3. For a trial: use `MODE="sample"`, `RANGES=("dang",)`, `COUNT=100`, and a unique sample run ID. For final: use `MODE="final"`, all four ranges, `COUNT=None`, references enabled, and a different run ID. Default chunk size is 100.
+4. New runs refuse existing run IDs. After a runtime reset, set `RESUME=True` with the same run ID/settings. The notebook restores corpus and journals from verified Drive checkpoints using the saved code revision. No cell deletes an earlier run.
+5. Operate one group crawler at a time. Session markers remain advisory. A four-hour session budget stops between chunks; only take over a stale shift after confirming its old runtime has stopped.
 
-[![Crawl in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/hcmus-arxiv-nhom1/CodeRepo/blob/main/src/notebooks/colab_crawl.ipynb) `colab_crawl.ipynb` · [![Benchmark in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/hcmus-arxiv-nhom1/CodeRepo/blob/main/src/notebooks/colab_benchmark.ipynb) `colab_benchmark.ipynb`
+Checkpoints target 300 seconds at completed-version boundaries and also run after chunks. Only new/changed completed files are archived; archives are read back and verified before a completion record is published. If a runtime dies during upload, restore uses the latest valid chain. This does not guarantee zero lost work: long versions or failed uploads can exceed the target interval. Live Range recovery does not persist an in-flight download across destroyed runtimes.
 
-Colab opens the copy on `main`; *File → Save a copy in Drive* keeps your own edits (`SHIFT_OWNER`, `LIMIT`). Grant access when the notebook asks for Google Drive and for the Colab Secrets `S2_API_KEY` / `ARXIV_CONTACT_EMAIL`.
+The profiler measures the crawler and its descendants, including periodic checkpoints. Post-chunk synchronization is timed separately. Installation, archive export and offline gaps between sessions are outside pipeline wall time. Retry/backoff time remains included. All attempts are retained; missing summaries after hard runtime loss are flagged in `timing_audit.json`, so incomplete timing is never silently presented as an exact final benchmark.
+
+Inspect `coverage.json` and the source/reference QA reports, then download `bench_results.zip`. The ZIP includes manifests, dependency/hardware session details, journals, logs, profiles and CSVs; corpus remains in `arxiv-nhom1/runs/<RUN_ID>/checkpoints` for M2. Restore that run with the saved implementation revision and leave source `.tex`/`.bib` files unchanged during parsing.
 
 ## Docker Compose: crawler workers with one global rate limiter
 

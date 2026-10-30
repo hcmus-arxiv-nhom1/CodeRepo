@@ -113,6 +113,26 @@ def test_end_to_end_layout_and_summary(tmp_path):
     assert state[("2606.00001", 1)]["dropped"] == {".png": {"files": 1, "bytes": len(PNG)}}
 
 
+def test_completed_version_callback_sees_durable_final_record(tmp_path):
+    seen = []
+
+    def checkpoint(rec):
+        state = load_version_state(tmp_path / "work/versions.jsonl")
+        assert state[(rec["arxiv_id"], rec["version"])] == rec
+        seen.append(rec)
+
+    run(
+        IDS,
+        data_root=tmp_path / "corpus",
+        work_dir=tmp_path / "work",
+        client=client_for(FakeArxiv()),
+        references=False,
+        progress=False,
+        on_version=checkpoint,
+    )
+    assert len(seen) == 4
+
+
 def test_second_run_on_same_work_dir_is_refused(tmp_path):
     with WorkDirLock(tmp_path / "work"):
         with pytest.raises(WorkDirLockedError):
