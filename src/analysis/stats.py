@@ -52,6 +52,8 @@ PAPER_COLUMNS = [
 # "S2 POST https://api.semanticscholar.org/... -> 429 (" (references)
 RESPONSE_RE = re.compile(r"\b(?:GET|POST) (https?://[^\s/]+)\S* -> (\d{3})\b")
 FAILURE_RE = re.compile(r"\b(?:GET|POST) (https?://[^\s/]+)\S* failed \(")
+# "backing off 4.0 s before next arXiv request" and "... pausing 900 s, pacing now 5.0 s"
+BACKOFF_RE = re.compile(r"\bbacking off ([\d.]+) s\b|\bpausing ([\d.]+) s\b")
 
 
 def source_of(host_url: str) -> str | None:
@@ -142,6 +144,26 @@ def request_counts(work_dirs: list[Path]) -> dict[str, Counter]:
                     if src := source_of(m.group(1)):
                         counts[src]["failed"] += 1
     return counts
+
+
+def backoff_seconds(work_dirs: list[Path]) -> tuple[float, int] | None:
+    """Delay the arXiv client asked for after 429/5xx/timeouts/403 (seconds, number of waits).
+
+    It is part of the wall time (the teaching team counts retries and delays), so the
+    benchmark reports it next to the total. ``None`` when there is no run.log.
+    """
+    total, waits, seen = 0.0, 0, False
+    for work_dir in work_dirs:
+        log = work_dir / "run.log"
+        if not log.exists():
+            continue
+        seen = True
+        with open(log, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if m := BACKOFF_RE.search(line):
+                    total += float(m.group(1) or m.group(2))
+                    waits += 1
+    return (round(total, 1), waits) if seen else None
 
 
 def references_rows(ids: list[str], rows: list[dict], work_dirs: list[Path]) -> list[dict]:
@@ -263,7 +285,12 @@ def discovery_seconds(work_dirs: list[Path]) -> float | None:
     return round(total, 1) if seen else None
 
 
-def benchmark_rows(agg: dict, discovery_s: float | None, n_ids: int) -> list[dict]:
+def benchmark_rows(
+    agg: dict,
+    discovery_s: float | None,
+    n_ids: int,
+    backoff: tuple[float, int] | None = None,
+) -> list[dict]:
     psutil_tool = "psutil, RSS of all processes (src/utils/profiler.py)"
     chunks = f"sum over {agg['chunks']} chunk(s)"
     rows = [
@@ -279,6 +306,12 @@ def benchmark_rows(agg: dict, discovery_s: float | None, n_ids: int) -> list[dic
         ("ram_mean", agg.get("rss_mean_mb"), "MB", f"{psutil_tool}, duration-weighted"),
         ("disk_max", agg.get("disk_max_mb"), "MB", "os.walk of data/ and work/"),
         ("output_size", agg.get("output_mb"), "MB", "os.walk of the corpus"),
+        (
+            "retry_backoff_wait",
+            backoff[0] if backoff else None,
+            "s",
+            f"run.log, {backoff[1]} waits after 429/5xx/timeouts/403" if backoff else "",
+        ),
         ("wall_time_time_v", agg.get("time_v_wall_s"), "s", "/usr/bin/time -v"),
         ("ram_max_main_process", agg.get("time_v_rss_max_mb"), "MB", "/usr/bin/time -v"),
     ]
@@ -337,7 +370,9 @@ def main(argv: list[str] | None = None) -> int:
     dirs = profile_dirs(args.profile_dir or work_dirs[0] / "profile")
     if dirs:
         agg, samples = aggregate_profiles(dirs, args.time_log)
-        bench = benchmark_rows(agg, discovery_seconds(work_dirs), len(ids))
+        bench = benchmark_rows(
+            agg, discovery_seconds(work_dirs), len(ids), backoff_seconds(work_dirs)
+        )
         write_csv(args.out / "benchmark_summary.csv", bench)
         write_csv(args.out / "resource_timeseries.csv", samples)
         written += ["benchmark_summary.csv", f"resource_timeseries.csv ({len(dirs)} profile(s))"]

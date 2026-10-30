@@ -196,13 +196,20 @@ class HttpClient:
 
     # ----------------------------------------------------------------- public
 
-    def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> FetchResult:
+    def get(
+        self,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        max_attempts: int | None = None,
+    ) -> FetchResult:
         """GET a small answer into memory (``FetchResult.content``).
 
         Returns the result for 200 and for non-retryable statuses (e.g. 404) so the caller
-        can decide; raises ``FetchError`` once retries are exhausted.
+        can decide; raises ``FetchError`` once retries are exhausted. ``max_attempts``
+        lowers the client default for a caller that has a cheaper fallback (discovery).
         """
-        return self._fetch(url, headers, None)
+        return self._fetch(url, headers, None, max_attempts)
 
     def stream(
         self,
@@ -238,10 +245,11 @@ class HttpClient:
             )
             return resp
 
-    def _fetch(self, url: str, headers, consume) -> FetchResult:
+    def _fetch(self, url: str, headers, consume, max_attempts: int | None = None) -> FetchResult:
         last_reason, last_status = "no attempt made", None
         wait_before = self.limiter.wait_s
-        for attempt in range(1, self.max_attempts + 1):
+        attempts = max_attempts or self.max_attempts
+        for attempt in range(1, attempts + 1):
             retry_after: str | None = None
             try:
                 with self.limiter.hold():  # whole body, resumes included: one connection
@@ -275,7 +283,8 @@ class HttpClient:
             except _TRANSIENT_ERRORS as exc:
                 last_reason, last_status = f"{type(exc).__name__}: {exc}", None
                 log.warning("GET %s failed (%s), attempt %d", url, last_reason, attempt)
-                self._backoff(attempt, None)
+                if attempt < attempts:  # nothing left to wait for after the last attempt
+                    self._backoff(attempt, None)
                 continue
 
             log.info(
@@ -299,7 +308,8 @@ class HttpClient:
             self._consecutive_403 = 0
             if status in RETRYABLE_STATUS:
                 last_reason = f"HTTP {status}"
-                self._backoff(attempt, retry_after)
+                if attempt < attempts:
+                    self._backoff(attempt, retry_after)
                 continue
             return FetchResult(
                 url=url,
@@ -313,7 +323,7 @@ class HttpClient:
                 elapsed_s=elapsed,
                 wait_s=self.limiter.wait_s - wait_before,
             )
-        raise FetchError(url, last_reason, last_status, self.max_attempts)
+        raise FetchError(url, last_reason, last_status, attempts)
 
     def _backoff(self, attempt: int, retry_after: str | None) -> None:
         delay = None

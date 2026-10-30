@@ -17,6 +17,11 @@ Dates are ISO 8601 UTC strings (``2026-06-30T17:59:57Z``); ``venue`` is the jour
    the API again with versioned IDs (``2606.30762v2``: ``updated`` is that version's
    date; checked against OAI-PMH on 2026-10-18).
 3. OAI-PMH ``GetRecord`` (``arXivRaw``) as the fallback for IDs the API did not return.
+
+The API is tried ``config.DISCOVERY_API_ATTEMPTS`` times per request. When arXiv keeps
+refusing it (429/5xx, as it did from a Colab IP on 30/10/2026: 10 failed calls and 226 s
+before the first OAI lookup), the IDs go to OAI-PMH at once: retrying with ``2**n`` s
+backoff costs more than the 3 s of one ``GetRecord``.
 """
 
 from __future__ import annotations
@@ -213,7 +218,7 @@ def load_snapshot(path: Path, wanted: Iterable[str]) -> dict[str, dict]:
 def api_query(client: HttpClient, ids: list[str]) -> list[ApiEntry]:
     """One arXiv API call for up to ``config.ARXIV_API_BATCH`` (base or versioned) IDs."""
     url = f"{config.ARXIV_API_URL}?id_list={','.join(ids)}&max_results={len(ids)}"
-    res = client.get(url)
+    res = client.get(url, max_attempts=config.DISCOVERY_API_ATTEMPTS)
     if res.status != 200:
         raise FetchError(url, f"HTTP {res.status}", res.status, res.attempts)
     return parse_api_feed(res.content)
@@ -296,18 +301,25 @@ def discover(
     if snapshot:
         log.info("discovery: %d/%d IDs found in the Kaggle snapshot", len(snap), len(todo))
 
-    # 1. Base IDs through the API (one retry for IDs a batch did not return).
+    # 1. Base IDs through the API. One retry for IDs a batch did not return or a cut feed;
+    #    IDs of a batch arXiv refused (FetchError) skip the retry and go straight to OAI.
     entries: dict[str, ApiEntry] = {}
+    refused: set[str] = set()
     for attempt in (1, 2):
-        pending = [i for i in todo if i not in entries]
+        pending = [i for i in todo if i not in entries and i not in refused]
         for batch in _batches(pending, config.ARXIV_API_BATCH):
             try:
                 entries.update((e.arxiv_id, e) for e in api_query(client, batch))
-            except (FetchError, etree.XMLSyntaxError) as exc:  # e.g. feed cut mid-body
+            except FetchError as exc:
+                result.api_failed_batches += 1
+                refused.update(batch)
+                log.error("discovery: API refused a batch (%s), using OAI-PMH for it", exc)
+            except etree.XMLSyntaxError as exc:  # feed cut mid-body: worth one more try
                 result.api_failed_batches += 1
                 log.error("discovery: API batch failed (%s)", exc)
-        if attempt == 1 and len(entries) < len(todo):
-            log.warning("discovery: API missed %d IDs, retrying once", len(todo) - len(entries))
+        missed = [i for i in todo if i not in entries and i not in refused]
+        if attempt == 1 and missed:
+            log.warning("discovery: API missed %d IDs, retrying once", len(missed))
 
     # 2. Date, title and authors of every version. A versioned ID (2606.30762v1) returns
     #    the metadata of that version: on 100 multi-version papers (27/10/2026) the title of
@@ -331,7 +343,11 @@ def discover(
                 if e.arxiv_id in dates:
                     dates[e.arxiv_id][e.version] = e.updated
                     per_version[e.arxiv_id][e.version] = e
-        except (FetchError, etree.XMLSyntaxError) as exc:
+        except FetchError as exc:  # refused: the papers still short of dates go to OAI below
+            result.api_failed_batches += 1
+            log.error("discovery: versioned API batch refused (%s), using OAI-PMH", exc)
+            break
+        except etree.XMLSyntaxError as exc:
             result.api_failed_batches += 1
             log.error("discovery: versioned API batch failed (%s)", exc)
     for arxiv_id, e in entries.items():

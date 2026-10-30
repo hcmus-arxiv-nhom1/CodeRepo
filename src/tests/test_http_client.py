@@ -231,3 +231,14 @@ def test_consumer_errors_propagate():
 
     with pytest.raises(ValueError):
         client.stream("https://export.arxiv.org/src/t", broken)
+
+
+def test_no_backoff_after_the_last_attempt():
+    """A fetch that gives up does not leave a pause behind: the retries already waited."""
+    clock, starts = FakeClock(), []
+    client = make_client(scripted([FakeResponse(429)] * 2, clock, starts), clock)
+    with pytest.raises(FetchError) as err:
+        client.get("https://export.arxiv.org/x", max_attempts=2)
+    assert err.value.attempts == 2 and starts == [0.0, 3.0]  # one backoff (2 s), pace wins
+    next_start = client.limiter._next_start  # noqa: SLF001
+    assert next_start == 3.0 + 3.0  # the 3 s pace only, no 4 s backoff after attempt 2
