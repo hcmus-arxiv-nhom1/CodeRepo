@@ -78,8 +78,8 @@ class FetchResult:
     nbytes: int = 0  # body bytes received
     attempts: int = 1
     resumes: int = 0  # Range resumes of the successful attempt
-    elapsed_s: float = 0.0  # request + transfer + streamed extraction; excludes limiter wait
-    wait_s: float = 0.0  # limiter wait for the successful attempt, including Range resumes
+    elapsed_s: float = 0.0  # full fetch across attempts, excluding measured limiter waits
+    wait_s: float = 0.0  # limiter/backoff waits across all attempts and Range resumes
 
 
 class ResumableBody(io.RawIOBase):
@@ -248,6 +248,7 @@ class HttpClient:
     def _fetch(self, url: str, headers, consume, max_attempts: int | None = None) -> FetchResult:
         last_reason, last_status = "no attempt made", None
         wait_before = self.limiter.wait_s
+        fetch_started = time.perf_counter()
         attempts = max_attempts or self.max_attempts
         for attempt in range(1, attempts + 1):
             retry_after: str | None = None
@@ -320,7 +321,9 @@ class HttpClient:
                 nbytes=nbytes,
                 attempts=attempt,
                 resumes=resumes,
-                elapsed_s=elapsed,
+                elapsed_s=max(
+                    0.0, time.perf_counter() - fetch_started - (self.limiter.wait_s - wait_before)
+                ),
                 wait_s=self.limiter.wait_s - wait_before,
             )
         raise FetchError(url, last_reason, last_status, attempts)

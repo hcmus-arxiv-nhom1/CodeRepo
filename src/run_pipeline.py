@@ -55,6 +55,7 @@ from src.crawler.ratelimit import get_arxiv_limiter
 from src.crawler.scheduler import AdaptiveBatchScheduler
 from src.crawler.worklock import WorkDirLock, WorkDirLockedError
 from src.utils.ids import iter_id_range, to_folder_name
+from src.utils.paper_timings import PaperTimings
 
 log = logging.getLogger("src.run_pipeline")
 
@@ -231,7 +232,9 @@ def _since(start: float) -> float:
     return round(time.perf_counter() - start, 3)
 
 
-def _start_references(ids: list[str], data_root: Path) -> threading.Thread | None:
+def _start_references(
+    ids: list[str], data_root: Path, *, on_record: Callable[[dict], None] | None = None
+) -> threading.Thread | None:
     if importlib.util.find_spec("src.crawler.references") is None:
         log.warning("references: src/crawler/references.py not available yet, skipped")
         return None
@@ -242,7 +245,7 @@ def _start_references(ids: list[str], data_root: Path) -> threading.Thread | Non
 
     def target() -> None:
         try:
-            crawl(ids, data_root)
+            crawl(ids, data_root, on_record=on_record)
         except Exception:
             log.exception("references: crawl failed")
 
@@ -451,21 +454,22 @@ def run(
     interrupted = False
     disc_log = JsonlWriter(work_dir / "discovery.jsonl")
     ver_log = JsonlWriter(work_dir / "versions.jsonl")
+    paper_times = PaperTimings(ids, data_root, work_dir, references)
     try:
         log.info("run %s: %d IDs %s -> %s", label or "", len(ids), ids[0], ids[-1])
-        disc = discover(
-            ids,
-            client,
-            data_root,
-            snapshot=snapshot,
-            refresh=refresh_metadata,
-            journal=disc_log.write,
-        )
+        discovery_started = time.perf_counter()
+        try:
+            disc = discover(
+                ids,
+                client,
+                data_root,
+                snapshot=snapshot,
+                refresh=refresh_metadata,
+                journal=disc_log.write,
+            )
+        finally:
+            discovery_s = time.perf_counter() - discovery_started
         found, missing, discovery_s = disc.found, disc.missing, disc.elapsed_s
-        ref_thread = (
-            _start_references([i for i in ids if i in found], data_root) if references else None
-        )
-
         state = load_version_state(work_dir / "versions.jsonl")
         todo = [
             (i, v)
@@ -473,6 +477,14 @@ def run(
             for v in range(1, found.get(i, 0) + 1)
             if not is_done(state.get((i, v)), data_root)
         ]
+        paper_times.discovered(found, missing, todo)
+        ref_thread = (
+            _start_references(
+                [i for i in ids if i in found], data_root, on_record=paper_times.reference
+            )
+            if references
+            else None
+        )
         if job_queue is not None:
             for (arxiv_id, version), rec in state.items():
                 if arxiv_id in found and rec.get("status") == "ok":
@@ -499,6 +511,7 @@ def run(
             ver_log.write(rec)
             state[(arxiv_id, version)] = rec
             processed.append(rec)
+            paper_times.version(rec)
             if on_version is not None:
                 on_version(rec)  # after extraction and the flushed/fsynced journal record
             if job_queue is not None and rec.get("status") == "ok":

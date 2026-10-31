@@ -19,8 +19,9 @@ def scripted(responses, clock, starts):
     return handler
 
 
-def test_fetch_result_reports_rate_limiter_wait_separately():
+def test_fetch_result_reports_rate_limiter_wait_separately(monkeypatch):
     clock, starts = FakeClock(), []
+    monkeypatch.setattr("src.crawler.http_client.time.perf_counter", clock)
     client = make_client(
         scripted([FakeResponse(200, b"first"), FakeResponse(200, b"second")], clock, starts),
         clock,
@@ -30,6 +31,21 @@ def test_fetch_result_reports_rate_limiter_wait_separately():
 
     assert result.wait_s == 3.0
     assert result.elapsed_s < 0.1
+
+
+def test_fetch_timing_includes_failed_attempt_work_without_double_counting_wait(monkeypatch):
+    clock, starts = FakeClock(), []
+    monkeypatch.setattr("src.crawler.http_client.time.perf_counter", clock)
+
+    def reply(url):
+        starts.append(clock())
+        clock.sleep(1)  # one second transferring each response
+        return FakeResponse(503 if len(starts) == 1 else 200, b"body")
+
+    result = make_client(reply, clock).get("https://export.arxiv.org/test")
+    assert result.attempts == 2
+    assert result.elapsed_s == pytest.approx(2)
+    assert result.elapsed_s + result.wait_s == pytest.approx(clock())
 
 
 def test_retry_after_is_honoured():

@@ -208,6 +208,7 @@ def crawl(
     client: S2Client | None = None,
     batch_size: int = BATCH_SIZE,
     max_batch_retries: int = 1,
+    on_record=None,
 ) -> dict:
     """Write references.json for every paper of ``arxiv_ids`` not done yet; return counts.
 
@@ -250,6 +251,8 @@ def crawl(
                         continue
                 record = build_record(arxiv_id, paper, refs)
                 write_record(data_root, record)
+                if on_record is not None:
+                    on_record(record)
                 counts[record["status"]] += 1
                 counts["references"] += record["num_references"]
                 counts["arxiv_references"] += record["num_arxiv_references"]
