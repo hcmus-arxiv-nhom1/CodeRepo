@@ -138,8 +138,21 @@ class Shift:
     def check(self) -> None:
         if self.error:
             raise RuntimeError("Shift heartbeat failed; stop crawling") from self.error
-        if json.loads(self.path.read_text(encoding="utf-8")).get("token") != self.token:
-            raise RuntimeError("Shift ownership changed; stop crawling")
+        for attempt in range(3):
+            try:
+                marker = json.loads(self.path.read_text(encoding="utf-8"))
+                if not isinstance(marker, dict):
+                    raise ValueError("Shift marker is not an object")
+            except (OSError, ValueError) as exc:
+                if attempt == 2:
+                    raise RuntimeError(
+                        "Shift marker missing/unreadable; stop and keep local data"
+                    ) from exc
+                time.sleep(0.2)
+                continue
+            if marker.get("token") != self.token:
+                raise RuntimeError("Shift ownership changed; stop crawling")
+            return
 
     def close(self, *, release: bool) -> None:
         self.stop.set()
@@ -253,6 +266,20 @@ def export_evidence(cfg: BenchmarkConfig, local: Path) -> Path:
             for file in folder.rglob("*"):
                 if file.is_file() and file.name != "run.lock":
                     archive.write(file, file.relative_to(local).as_posix())
+    return path
+
+
+def export_rescue(local: Path, stage: Path | None = None) -> Path:
+    """Raw local recovery package: no Drive access, QA or stats regeneration."""
+    path = local / "rescue_results.zip"
+    folders = [(local / name, name) for name in ("work", "data", "book_csv")]
+    if stage is not None:
+        folders.append((stage, "telemetry_staging"))
+    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+        for folder, prefix in folders:
+            for file in folder.rglob("*"):
+                if file.is_file() and file.name != "run.lock":
+                    archive.write(file, f"{prefix}/{file.relative_to(folder).as_posix()}")
     return path
 
 
@@ -414,7 +441,13 @@ def run_benchmark(
                 cmd = ["/usr/bin/time", "-v", "-o", str(prof / "time_v.log"), *cmd]
             print(f"=== {chunk.owner} offset={chunk.offset} IDs={len(chunk.ids)} ===", flush=True)
             measurements.phase = "crawl-chunk"
-            child = subprocess.Popen(cmd, start_new_session=sys.platform != "win32")
+            with (prof / "console.log").open("wb") as console:
+                child = subprocess.Popen(
+                    cmd,
+                    start_new_session=sys.platform != "win32",
+                    stdout=console,
+                    stderr=subprocess.STDOUT,
+                )
             try:
                 while child.poll() is None:
                     shift.check()
@@ -464,7 +497,9 @@ def run_benchmark(
                 )
             print(f"Drive checkpoint verified; post-chunk sync={sync_s:.1f}s", flush=True)
             if code:
-                raise RuntimeError(f"Chunk exit {code}; inspect work/run.log, then resume")
+                raise RuntimeError(
+                    f"Chunk exit {code}; inspect {prof / 'console.log'} and work/run.log"
+                )
             if not _chunk_complete(chunk, local, cfg.references):
                 raise RuntimeError("Chunk QA incomplete; evidence retained, resume to retry")
         measurements.phase = "qa-and-reports"
@@ -478,46 +513,118 @@ def run_benchmark(
         safe_to_release = True
         return result
     finally:
+        primary_error = sys.exception()
+        cleanup_errors = []
+
+        def cleanup(phase, action):
+            try:
+                return action()
+            except Exception as exc:
+                cleanup_errors.append(dict(phase=phase, error=f"{type(exc).__name__}: {exc}"))
+                logging.exception("Cleanup failed during %s; preserving local evidence", phase)
+                return None
+
         # A hard runtime loss cannot execute this block: only verified checkpoints survive.
         if run_ready and child is None:
             try:
                 if measurements is not None:
                     measurements.phase = "final-sync"
+                shift.check()  # never publish into a run after losing ownership/Drive visibility
                 Checkpoints(local, remote).save(
                     [i for c in plan_chunks(cfg) for i in c.ids], phase="final"
                 )
                 safe_to_release = True
-            except Exception:
+            except Exception as exc:
+                cleanup_errors.append(
+                    dict(phase="final-checkpoint", error=f"{type(exc).__name__}: {exc}")
+                )
                 logging.exception("Final checkpoint failed; shift kept active")
                 safe_to_release = False
-        shift.close(release=safe_to_release or not run_ready)
+        before = len(cleanup_errors)
+        cleanup("shift-release", lambda: shift.close(release=safe_to_release or not run_ready))
+        if len(cleanup_errors) != before:
+            safe_to_release = False
         if measurements is not None:
             from src.benchmark.measurements import collect_measurements
 
-            measurements.finish()
-            collect_measurements(local, remote)
+            measurement_summary = cleanup(
+                "local-measurement-finalization",
+                lambda: measurements.finish(publish_remote=safe_to_release),
+            )
+            if measurement_summary and not measurement_summary["complete"]:
+                cleanup_errors.append(
+                    dict(
+                        phase="measurement-publication",
+                        error=measurement_summary.get("telemetry_error", "Incomplete measurement"),
+                    )
+                )
+            if safe_to_release and measurement_summary and measurement_summary["complete"]:
+                cleanup(
+                    "remote-measurement-collection", lambda: collect_measurements(local, remote)
+                )
         if run_ready:
             session = dict(
                 seconds_through_final_sync=time.perf_counter() - session_start,
                 shift_released=safe_to_release,
                 ended_at=datetime.now(UTC).isoformat(),
             )
-            write_json(local / f"work/session_totals/{session_id}.json", session)
-            if safe_to_release:
-                write_json(remote / f"sessions/{session_id}.json", session)
-            if result is None:
-                result = (
-                    json.loads((local / "work/coverage.json").read_text())
-                    if (local / "work/coverage.json").exists()
-                    else {}
-                )
-            result.update(timing_audit(local))
-            result["final_complete"] = (
-                result.get("final_corpus_complete", False) and result["timing_complete"]
+            cleanup(
+                "local-session-summary",
+                lambda: write_json(local / f"work/session_totals/{session_id}.json", session),
             )
-            write_json(local / "work/coverage.json", result)
+            if safe_to_release:
+                cleanup(
+                    "remote-session-summary",
+                    lambda: write_json(remote / f"sessions/{session_id}.json", session),
+                )
+            if result is None:
+                result = cleanup("local-QA", lambda: coverage(cfg, local)) or {}
+                result["final_corpus_complete"] = result.get("final_complete", False)
+            result.update(
+                cleanup("timing-audit", lambda: timing_audit(local)) or {"timing_complete": False}
+            )
+            result["final_complete"] = (
+                result.get("final_corpus_complete", False)
+                and result["timing_complete"]
+                and not cleanup_errors
+            )
+            cleanup("local-coverage", lambda: write_json(local / "work/coverage.json", result))
+            diagnostic = dict(
+                primary_error=f"{type(primary_error).__name__}: {primary_error}"
+                if primary_error
+                else None,
+                errors=cleanup_errors,
+            )
+            cleanup(
+                "local-diagnostics",
+                lambda: write_json(local / "work/cleanup_errors.json", diagnostic),
+            )
             # Include the last checkpoint event and session total in the downloadable ZIP.
-            export_evidence(cfg, local)
+            evidence = cleanup("local-evidence-export", lambda: export_evidence(cfg, local))
+            if cleanup_errors:
+                result["final_complete"] = False
+                cleanup("local-coverage", lambda: write_json(local / "work/coverage.json", result))
+            cleanup(
+                "local-diagnostics",
+                lambda: write_json(local / "work/cleanup_errors.json", diagnostic),
+            )
+            if evidence is None:
+                rescue = cleanup(
+                    "raw-rescue-export",
+                    lambda: export_rescue(
+                        local, measurements.stage if measurements is not None else None
+                    ),
+                )
+                if rescue is not None:
+                    print(f"Raw rescue evidence saved locally: {rescue}", flush=True)
+        if cleanup_errors:
+            message = (
+                f"Cleanup errors recorded in {local / 'work/cleanup_errors.json'}; keep local data."
+            )
+            if primary_error is not None:
+                primary_error.add_note(message)
+            else:
+                raise RuntimeError(message)
 
 
 if __name__ == "__main__":
