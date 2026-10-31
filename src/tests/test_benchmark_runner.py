@@ -81,8 +81,8 @@ def test_rejected_revision_never_finalizes_or_changes_saved_run(tmp_path):
             owner="dang",
             resume=True,
         )
-    records = list((remote / "checkpoints").glob("*.json"))
-    assert [p.stem for p in records] == [first["generation"]]
+    index = json.loads((remote / "INDEX.json").read_text())
+    assert index["generation"] == first["generation"]
     assert (local / "work/manifest.json").read_bytes() == before
 
 
@@ -98,19 +98,21 @@ def seed_version(root, *, status="ok"):
     return paper
 
 
-def test_checkpoint_survives_kill_and_ignores_uncommitted_upload(tmp_path):
+def test_checkpoint_survives_kill_and_ignores_stray_upload(tmp_path):
     local, remote, restored = (tmp_path / n for n in ("local", "remote", "restored"))
     seed_version(local)
     cp = Checkpoints(local, remote)
     first = cp.save(["2604.20535"])
     assert first["versions"] == 1
-    (remote / "checkpoints/incomplete.zip").write_bytes(b"cut upload")
+    # A kill mid-copy leaves a stray temp file next to the real one; it must be ignored.
+    (remote / "data/corpus/2604-20535/v1/main.tex.tmp-deadbeef").write_bytes(b"cut upload")
     Checkpoints(restored, remote).restore()
     assert (restored / "data/corpus/2604-20535/v1/main.tex").read_text() == "complete source"
     assert not (restored / "work/run.lock").exists()
+    assert not (restored / "data/corpus/2604-20535/v1/main.tex.tmp-deadbeef").exists()
 
 
-def test_failed_version_is_not_committed_and_corrupt_latest_falls_back(tmp_path):
+def test_failed_version_is_not_committed_and_corruption_is_detected(tmp_path):
     local, remote = tmp_path / "local", tmp_path / "remote"
     paper = seed_version(local)
     cp = Checkpoints(local, remote)
@@ -121,13 +123,13 @@ def test_failed_version_is_not_committed_and_corrupt_latest_falls_back(tmp_path)
     with (local / "work/versions.jsonl").open("a") as fh:
         fh.write(json.dumps(dict(arxiv_id="2604.20535", version=2, status="failed")) + "\n")
     second = cp.save(["2604.20535"])
-    (remote / "checkpoints" / second["archive"]).write_bytes(b"corrupted")
+    assert second["versions"] == first["versions"] == 1
+    assert not (remote / "data/corpus/2604-20535/v2").exists()
+    # A bit flip on an already-mirrored file must be reported, never silently reused.
+    (remote / "data/corpus/2604-20535/v1/main.tex").write_bytes(b"corrupted")
     restored = tmp_path / "restored"
-    result = Checkpoints(restored, remote).restore()
-    assert result["generation"] == first["generation"]
-    assert not (restored / "data/corpus/2604-20535/v2").exists()
-    third = Checkpoints(restored, remote).save(["2604.20535"])
-    assert third["parent"] == first["generation"]
+    with pytest.raises(ValueError, match="mismatch"):
+        Checkpoints(restored, remote).restore()
 
 
 def test_verification_failure_never_publishes_completion(tmp_path, monkeypatch):
@@ -137,7 +139,7 @@ def test_verification_failure_never_publishes_completion(tmp_path, monkeypatch):
     monkeypatch.setattr(cp, "_verify", lambda *a: False)
     with pytest.raises(OSError):
         cp.save(["2604.20535"])
-    assert not list((remote / "checkpoints").glob("*.json"))
+    assert not (remote / "INDEX.json").exists()
 
 
 def test_checkpoint_requires_every_recorded_source_file(tmp_path):
@@ -167,19 +169,13 @@ def test_restore_rejects_unsafe_archive_path():
     assert Checkpoints.safe_name("data/corpus/a/v1/main.tex")
 
 
-def test_checkpoint_spool_is_inside_measured_work_tree(tmp_path, monkeypatch):
-    import src.benchmark.checkpoints as module
-
+def test_checkpoint_copies_land_directly_under_remote_mirror(tmp_path):
     local, remote = tmp_path / "local", tmp_path / "remote"
     seed_version(local)
-    original = module.shutil.copyfile
-
-    def copy(source, destination):
-        assert Path(source).is_relative_to(local / "work")
-        return original(source, destination)
-
-    monkeypatch.setattr(module.shutil, "copyfile", copy)
     Checkpoints(local, remote).save(["2604.20535"])
+    assert (remote / "data/corpus/2604-20535/v1/main.tex").read_text() == "complete source"
+    assert (remote / "data/corpus/2604-20535/metadata.json").is_file()
+    assert not list(remote.glob("**/*.zip"))
 
 
 def test_all_checkpoint_phases_have_durable_duration_events(tmp_path):

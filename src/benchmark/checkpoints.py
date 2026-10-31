@@ -1,4 +1,11 @@
-"""Verified, append-only Drive checkpoints. No live extraction directory is copied."""
+"""Verified, raw-folder Drive checkpoints. No live extraction directory is copied.
+
+Every completed version/metadata/journal file is mirrored byte-for-byte under
+the run's remote folder (not zipped); M2 can read the Drive corpus directly.
+`INDEX.json` is the single, atomically-replaced pointer to the current
+mirrored state, written only after every file in this save has been copied
+and read back verified.
+"""
 
 # Drafted with assistance from OpenAI Codex, disclosed per course rules.
 
@@ -11,7 +18,6 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from src.run_pipeline import FINAL_STATUSES, load_version_state
 from src.utils.ids import to_folder_name
@@ -50,18 +56,19 @@ def prepare_drive(root: Path, team_id: str, *, initialize: bool = False) -> None
 
 
 class Checkpoints:
-    """Immutable zip deltas plus a completion record written after read-back verification.
+    """A plain mirror of the run's raw corpus/work tree, kept on Drive as real folders.
 
-    Completion records contain hashes of changed files and the parent generation.
-    Restore validates the complete chain before touching the local run directory.
-    Drive markers are not claimed to be an atomic distributed transaction/lock.
+    Each file is copied through a sibling temp name and verified by read-back hash
+    before the atomic rename, so a kill mid-copy never corrupts a previously
+    committed file. `INDEX.json` (the manifest of every mirrored file's hash) is
+    replaced last; a kill between file copies just leaves it pointing at the
+    previous, still-valid, generation.
     """
 
     def __init__(self, local: Path, remote: Path):
         self.local, self.remote = Path(local), Path(remote)
-        self.folder = self.remote / "checkpoints"
-        self.folder.mkdir(parents=True, exist_ok=True)
-        self.parent = None
+        self.remote.mkdir(parents=True, exist_ok=True)
+        self.generation = None
         self.hashes: dict[str, str] = {}
         self.directories: set[str] = set()
         self._loaded = False
@@ -77,38 +84,20 @@ class Checkpoints:
             and "\\" not in name
         )
 
-    def _records(self) -> dict[str, dict]:
-        records = {}
-        for path in sorted(self.folder.glob("*.json")):
-            try:
-                rec = json.loads(path.read_text(encoding="utf-8"))
-                if rec["generation"] == path.stem and rec["archive"] == path.stem + ".zip":
-                    records[path.stem] = rec
-            except (ValueError, KeyError, OSError):
-                continue  # interrupted completion record
-        return records
-
-    def _chain(self, records: dict, head: str) -> list[dict]:
-        chain, seen = [], set()
-        while head is not None:
-            if head in seen or head not in records:
-                raise ValueError("Broken checkpoint chain")
-            seen.add(head)
-            rec = records[head]
-            chain.append(rec)
-            head = rec["parent"]
-        return list(reversed(chain))
-
-    def _load_index(self, chain: list[dict]) -> None:
-        self.hashes, self.directories = {}, set()
-        for rec in chain:
-            self.hashes.update(rec["files"])
-            self.directories.update(rec["directories"])
-        self.parent = chain[-1]["generation"] if chain else None
-        self._loaded = True
-
     def _verify(self, path: Path, expected: str) -> bool:
         return digest(path) == expected
+
+    def _load_index(self) -> None:
+        index_path = self.remote / "INDEX.json"
+        head_path = self.local / ".checkpoint-head.json"
+        if index_path.exists() and not head_path.exists():
+            raise ValueError("Restore a verified checkpoint before saving into this run")
+        if head_path.exists():
+            head = json.loads(head_path.read_text(encoding="utf-8"))
+            self.generation = head["generation"]
+            self.hashes = dict(head["files"])
+            self.directories = set(head["directories"])
+        self._loaded = True
 
     def save(
         self, ids: list[str], *, phase: str = "checkpoint", included_in_pipeline: bool = False
@@ -134,14 +123,9 @@ class Checkpoints:
 
     def _save(self, ids: list[str]) -> dict:
         if not self._loaded:
-            records = self._records()
-            head = self.local / ".checkpoint-head.json"
-            if records and not head.exists():
-                raise ValueError("Restore a verified checkpoint before saving into this run")
-            generation = json.loads(head.read_text())["generation"] if records else None
-            self._load_index(self._chain(records, generation) if records else [])
+            self._load_index()
         state = load_version_state(self.local / "work/versions.jsonl")
-        candidates: dict[str, bytes | Path] = {}
+        candidates: dict[str, Path] = {}
         directories = set()
         versions = 0
         for rec in state.values():
@@ -176,105 +160,84 @@ class Checkpoints:
                     and "tmp" not in path.relative_to(work).parts
                 ):
                     candidates[path.relative_to(self.local).as_posix()] = path
-        newdirs = sorted(directories - self.directories)
-        files = {}
+        for rel in directories:
+            (self.remote / rel).mkdir(parents=True, exist_ok=True)
+        files = dict(self.hashes)
+        copied_bytes = 0
+        for name, path in candidates.items():
+            if name.startswith("data/") and name.endswith(".json"):
+                try:
+                    json.loads(path.read_bytes())
+                except ValueError:
+                    continue  # torn metadata/references write; retry at the next checkpoint
+            sha = digest(path)
+            if self.hashes.get(name) == sha:
+                files[name] = sha
+                continue
+            destination = self.remote / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            tmp = destination.parent / f"{destination.name}.tmp-{uuid.uuid4().hex[:8]}"
+            try:
+                shutil.copyfile(path, tmp)
+                if not self._verify(tmp, sha):
+                    raise OSError(f"Drive checkpoint verification failed: {name}")
+                tmp.replace(destination)
+            finally:
+                tmp.unlink(missing_ok=True)
+            files[name] = sha
+            copied_bytes += path.stat().st_size
         generation = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + "-" + uuid.uuid4().hex[:8]
-        tmp = self.local / "work/tmp/checkpoints" / (generation + ".zip")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with ZipFile(tmp, "w", ZIP_DEFLATED) as archive:
-                for name in newdirs:
-                    archive.writestr(name, b"")
-                for name, content in candidates.items():
-                    # Snapshot one mutable journal/JSON at a time; never buffer the corpus.
-                    if isinstance(content, Path) and (
-                        name.startswith("work/") or name.endswith(".json")
-                    ):
-                        content = content.read_bytes()
-                        if name.startswith("data/"):
-                            try:
-                                json.loads(content)
-                            except ValueError:
-                                continue
-                    sha = (
-                        digest(content)
-                        if isinstance(content, Path)
-                        else hashlib.sha256(content).hexdigest()
-                    )
-                    if self.hashes.get(name) == sha:
-                        continue
-                    files[name] = sha
-                    if isinstance(content, Path):
-                        archive.write(content, name)
-                    else:
-                        archive.writestr(name, content)
-            expected = digest(tmp)
-            destination = self.folder / tmp.name
-            shutil.copyfile(tmp, destination)
-            if not self._verify(destination, expected):
-                raise OSError("Drive checkpoint verification failed; previous checkpoint retained")
-            rec = dict(
-                generation=generation,
-                parent=self.parent,
-                archive=tmp.name,
-                sha256=expected,
-                bytes=destination.stat().st_size,
-                files=files,
-                directories=newdirs,
-                versions=versions,
-                committed_at=datetime.now(UTC).isoformat(),
-            )
-            # Publish last. A torn JSON record is ignored on restore.
-            (self.folder / (generation + ".json")).write_text(json.dumps(rec), encoding="utf-8")
-            if (
-                json.loads((self.folder / (generation + ".json")).read_text(encoding="utf-8"))
-                != rec
-            ):
-                raise OSError("Checkpoint completion record could not be verified")
-            self.hashes.update(files)
-            self.directories.update(newdirs)
-            self.parent = generation
-            write_json(self.local / ".checkpoint-head.json", {"generation": generation})
-            return rec
-        finally:
-            tmp.unlink(missing_ok=True)
+        rec = dict(
+            generation=generation,
+            files=files,
+            directories=sorted(self.directories | directories),
+            versions=versions,
+            bytes=copied_bytes,
+            committed_at=datetime.now(UTC).isoformat(),
+        )
+        # Publish last: a torn/partial write here still leaves the previous INDEX valid.
+        write_json(self.remote / "INDEX.json", rec)
+        if json.loads((self.remote / "INDEX.json").read_text(encoding="utf-8")) != rec:
+            raise OSError("Checkpoint index could not be verified")
+        self.generation, self.hashes, self.directories = generation, files, set(rec["directories"])
+        write_json(
+            self.local / ".checkpoint-head.json",
+            dict(generation=generation, files=files, directories=rec["directories"]),
+        )
+        return rec
 
     def restore(self) -> dict:
-        records = self._records()
-        if not records:
+        index_path = self.remote / "INDEX.json"
+        if not index_path.exists():
             raise ValueError("No completed checkpoint available")
-        chain = None
-        verified = set()
-        for head in sorted(records, reverse=True):
-            try:
-                attempt = self._chain(records, head)
-                for rec in attempt:
-                    if rec["generation"] not in verified:
-                        if not self._verify(self.folder / rec["archive"], rec["sha256"]):
-                            raise ValueError("Checkpoint checksum mismatch")
-                        verified.add(rec["generation"])
-                chain = attempt
-                break
-            except (OSError, ValueError, KeyError):
-                continue
-        if chain is None:
-            raise ValueError("No valid checkpoint chain remains")
+        index = json.loads(index_path.read_text(encoding="utf-8"))
         # Refuse merging restored state with arbitrary/stale local data.
         if self.local.exists() and any(self.local.iterdir()):
             raise FileExistsError("Restore needs a fresh local directory")
         self.local.mkdir(parents=True, exist_ok=True)
-        for rec in chain:
-            with ZipFile(self.folder / rec["archive"]) as archive:
-                for name in archive.namelist():
-                    if not self.safe_name(name):
-                        raise ValueError("Unsafe checkpoint member")
-                archive.extractall(self.local)  # names checked; archives generated by this class
-        self._load_index(chain)
-        # File hashes validate restoration, including later work-log replacements.
-        for name, expected in self.hashes.items():
-            if digest(self.local / name) != expected:
+        for rel in index["directories"]:
+            if not self.safe_name(rel):
+                raise ValueError("Unsafe checkpoint member")
+            (self.local / rel).mkdir(parents=True, exist_ok=True)
+        for name, expected in index["files"].items():
+            if not self.safe_name(name):
+                raise ValueError("Unsafe checkpoint member")
+            source = self.remote / name
+            if not source.is_file() or not self._verify(source, expected):
                 raise ValueError(f"Restored file mismatch: {name}")
-        write_json(self.local / ".checkpoint-head.json", {"generation": self.parent})
+            destination = self.local / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        self.generation, self.hashes, self.directories = (
+            index["generation"],
+            dict(index["files"]),
+            set(index["directories"]),
+        )
+        write_json(
+            self.local / ".checkpoint-head.json",
+            dict(generation=self.generation, files=self.hashes, directories=index["directories"]),
+        )
+        self._loaded = True
         # The latest duration event is published after its data checkpoint.
         events = []
         for path in sorted((self.remote / "checkpoint-events").glob("*.json")):
@@ -295,4 +258,4 @@ class Checkpoints:
         from src.benchmark.measurements import collect_measurements
 
         collect_measurements(self.local, self.remote)
-        return chain[-1]
+        return index
