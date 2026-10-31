@@ -2,6 +2,8 @@
 import csv
 import json
 
+import pytest
+
 from src.analysis import stats
 from src.run_pipeline import JsonlWriter
 
@@ -199,7 +201,10 @@ def test_checkpoint_seconds_separates_included_time_and_deduplicates(tmp_path):
     assert checkpoint_seconds([tmp_path]) == (2, 3)
 
 
-def test_stats_official_metrics_use_session_scope_even_without_chunk_summary(tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_chunk", [False, True])
+def test_stats_official_metrics_use_session_scope_even_without_chunk_summary(
+    tmp_path, monkeypatch, with_chunk
+):
     from src.benchmark import measurements as m
     from src.tests.helpers import FakeClock
 
@@ -212,12 +217,17 @@ def test_stats_official_metrics_use_session_scope_even_without_chunk_summary(tmp
     clock.sleep(10)
     sampler.finish()
     m.collect_measurements(tmp_path, tmp_path / "remote")
+    if with_chunk:
+        write_chunk(work / "profile", "c", "2026-10-31", 1, 30, 20, 1, 1, [(0, 20, 1)])
     out = tmp_path / "csv"
     stats.main(["--data-root", str(data), "--work-dir", str(work), "--out", str(out)])
     bench = {r["metric"]: r for r in read_csv(out / "benchmark_summary.csv")}
     assert float(bench["wall_time_e2e"]["value"]) == 10
     assert float(bench["avg_paper_time"]["value"]) == 2.5
     assert float(bench["ram_max"]["value"]) == 100
+    if with_chunk:
+        assert "ram_max_main_process" not in bench
+        assert float(bench["time_v_max_rss"]["value"]) == 30
     assert (out / "measurement_audit.json").is_file()
     corpus = {r["metric"]: r for r in read_csv(out / "corpus_summary.csv")}
     assert float(corpus["papers_complete"]["value"]) == 3
@@ -267,7 +277,7 @@ def test_paper_timing_export_deduplicates_durable_events_and_keeps_incomplete_at
     ]
     (work / "paper_events.jsonl").write_text("\n".join(json.dumps(e) for e in records) + "\n")
     (durable / "papers-000000.json").write_text(
-        json.dumps(dict(rows=records, sha256=rows_digest(records)))
+        json.dumps(dict(sequence=0, rows=records, sha256=rows_digest(records)))
     )
     rows = paper_attempt_rows([work], ["x"])
     assert len(rows) == 2

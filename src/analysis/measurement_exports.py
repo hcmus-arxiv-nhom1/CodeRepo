@@ -21,7 +21,12 @@ PAPER_TIMING_COLUMNS = [
 
 
 def paper_attempt_rows(work_dirs: list[Path], ids: list[str]) -> list[dict]:
+    return paper_timing_report(work_dirs, ids)[0]
+
+
+def paper_timing_report(work_dirs: list[Path], ids: list[str]) -> tuple[list[dict], dict]:
     wanted, events = set(ids), {}
+    errors = []
     for work in work_dirs:
         journal = work / "paper_events.jsonl"
         if journal.exists():
@@ -31,12 +36,27 @@ def paper_attempt_rows(work_dirs: list[Path], ids: list[str]) -> list[dict]:
                     events[json.dumps(event, sort_keys=True)] = event
                 except ValueError:
                     continue
-        for path in sorted((work / "measurements").glob("*/papers-*.json")):
-            part = json.loads(path.read_text(encoding="utf-8"))
-            if rows_digest(part["rows"]) != part["sha256"]:
-                raise ValueError(f"Paper telemetry checksum mismatch: {path}")
-            for event in part["rows"]:
-                events[json.dumps(event, sort_keys=True)] = event
+        for folder in sorted((work / "measurements").glob("*")):
+            parts = sorted(folder.glob("papers-*.json"))
+            summary = folder / "summary.json"
+            if summary.exists():
+                try:
+                    expected = json.loads(summary.read_text(encoding="utf-8"))["paper_segments"]
+                    if expected != len(parts):
+                        errors.append(f"Missing/unexpected paper segments: {folder}")
+                except (OSError, ValueError, KeyError):
+                    errors.append(f"Invalid paper segment manifest: {folder}")
+            for sequence, path in enumerate(parts):
+                try:
+                    part = json.loads(path.read_text(encoding="utf-8"))
+                    if path.name != f"papers-{sequence:06d}.json" or part["sequence"] != sequence:
+                        raise ValueError("Missing/out-of-order paper segment")
+                    if rows_digest(part["rows"]) != part["sha256"]:
+                        raise ValueError("Paper telemetry checksum mismatch")
+                    for event in part["rows"]:
+                        events[json.dumps(event, sort_keys=True)] = event
+                except (OSError, ValueError, KeyError, TypeError):
+                    errors.append(f"Invalid paper segment: {path}")
     attempts = {}
     for event in events.values():
         if event["arxiv_id"] not in wanted:
@@ -48,7 +68,7 @@ def paper_attempt_rows(work_dirs: list[Path], ids: list[str]) -> list[dict]:
     for (arxiv_id, attempt_id), events in attempts.items():
         start = (events.get("start") or [{}])[0]
         end = (events.get("complete") or [{}])[-1]
-        complete = bool(start and end)
+        complete = bool(start and end) and not errors
         rows.append(
             dict(
                 arxiv_id=arxiv_id,
@@ -57,11 +77,23 @@ def paper_attempt_rows(work_dirs: list[Path], ids: list[str]) -> list[dict]:
                 completed_at=end.get("at", ""),
                 complete=complete,
                 lifecycle_s=end["elapsed_s"] - start["elapsed_s"] if complete else None,
-                source_work_s=sum(e.get("source_work_s", 0) for e in events.get("version", [])),
+                source_work_s=(
+                    sum(e.get("source_work_s", 0) for e in events.get("version", []))
+                    if not errors
+                    else None
+                ),
                 references_status=end.get("references_status", ""),
             )
         )
-    return sorted(rows, key=lambda r: (r["arxiv_id"], r["started_at"], r["attempt_id"]))
+    missing = sorted(wanted - {r["arxiv_id"] for r in rows if r["complete"]})
+    return (
+        sorted(rows, key=lambda r: (r["arxiv_id"], r["started_at"], r["attempt_id"])),
+        dict(
+            complete=bool(wanted) and not errors and not missing,
+            errors=errors,
+            missing_completed_ids=missing,
+        ),
+    )
 
 
 def session_exports(work_dirs: list[Path], data: Path, n_ids: int) -> tuple[list, list, dict]:

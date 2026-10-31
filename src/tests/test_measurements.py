@@ -176,3 +176,44 @@ def test_real_child_memory_and_background_publication_are_observed(tmp_path):
     finally:
         child.terminate()
         child.wait(timeout=10)
+
+
+def test_torn_paper_segment_exports_incomplete_audit_instead_of_crashing(tmp_path, monkeypatch):
+    from src.analysis.measurement_exports import paper_timing_report
+    from src.benchmark.measurements import collect_measurements
+    from src.benchmark.runner import timing_audit
+
+    sample, clock, memory, local, remote = monitor(tmp_path, monkeypatch)
+    sample.sample()
+    sample.finish()
+    (remote / "measurements/session-1/papers-000000.json").write_text('{"rows":[')
+    collect_measurements(local, remote)
+    rows, audit = paper_timing_report([local / "work"], ["x"])
+    assert not audit["complete"] and audit["errors"]
+    assert not timing_audit(local)["timing_complete"]
+
+
+def test_missing_middle_paper_segment_cannot_certify_source_work(tmp_path, monkeypatch):
+    from src.analysis.measurement_exports import paper_timing_report
+    from src.benchmark.measurements import collect_measurements
+
+    sample, clock, memory, local, remote = monitor(tmp_path, monkeypatch)
+    journal = local / "work/paper_events.jsonl"
+    journal.parent.mkdir(parents=True)
+    for record in [
+        dict(event="start", elapsed_s=0, at="start"),
+        dict(event="version", elapsed_s=2, source_work_s=2),
+        dict(event="complete", elapsed_s=5, at="end", references_status="ok"),
+    ]:
+        record.update(arxiv_id="x", attempt_id="a")
+        with journal.open("a") as fh:
+            fh.write(json.dumps(record) + "\n")
+        sample.sample()
+        sample.flush()
+    sample.finish()
+    (remote / "measurements/session-1/papers-000001.json").unlink()
+    fresh = tmp_path / "fresh"
+    collect_measurements(fresh, remote)
+    rows, audit = paper_timing_report([fresh / "work"], ["x"])
+    assert not audit["complete"] and audit["errors"]
+    assert rows[0]["source_work_s"] is None

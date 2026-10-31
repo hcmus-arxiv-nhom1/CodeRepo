@@ -78,3 +78,28 @@ def test_resume_after_torn_paper_event_preserves_new_attempt_start(tmp_path):
     )
     rows = paper_attempt_rows([work], IDS)
     assert len(rows) == len(IDS) and all(r["complete"] for r in rows)
+
+
+def test_interrupted_discovery_duration_is_not_zero(tmp_path, monkeypatch):
+    import pytest
+
+    clock = FakeClock()
+    monkeypatch.setattr("src.run_pipeline.time.perf_counter", clock)
+
+    def failed(*a, **kw):
+        clock.sleep(17)
+        raise RuntimeError("discovery interrupted")
+
+    monkeypatch.setattr("src.run_pipeline.discover", failed)
+    with pytest.raises(RuntimeError, match="discovery interrupted"):
+        run(
+            IDS,
+            data_root=tmp_path / "corpus",
+            work_dir=tmp_path / "work",
+            client=client_for(FakeArxiv()),
+            references=False,
+            progress=False,
+        )
+    summary = json.loads((tmp_path / "work/run_summary.json").read_text())
+    assert summary["discovery_s"] == 17
+    assert summary["interrupted"]

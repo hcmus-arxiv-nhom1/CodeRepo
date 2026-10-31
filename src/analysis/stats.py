@@ -395,11 +395,11 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(args.out / "references_stats.csv", references_rows(ids, rows, work_dirs))
     from src.analysis.measurement_exports import (
         PAPER_TIMING_COLUMNS,
-        paper_attempt_rows,
+        paper_timing_report,
         session_exports,
     )
 
-    paper_times = paper_attempt_rows(work_dirs, ids)
+    paper_times, paper_audit = paper_timing_report(work_dirs, ids)
     write_csv(args.out / "paper_attempt_timings.csv", paper_times, PAPER_TIMING_COLUMNS)
     complete = [r for r in rows if r["n_versions"] > 0 and r["n_versions_ok"] == r["n_versions"]]
     n = len(ids)
@@ -470,6 +470,7 @@ def main(argv: list[str] | None = None) -> int:
             "ram_mean": "crawler_ram_mean",
             "disk_max": "chunk_disk_max",
             "output_size": "chunk_output_size",
+            "ram_max_main_process": "time_v_max_rss",
         }
         for metric in bench:
             metric["metric"] = renamed.get(metric["metric"], metric["metric"])
@@ -478,6 +479,10 @@ def main(argv: list[str] | None = None) -> int:
     audit["papers_with_completed_lifecycle"] = len(
         {r["arxiv_id"] for r in paper_times if r["complete"]}
     )
+    audit["session_measurement_complete"] = audit["measurement_complete"]
+    audit["paper_timing_complete"] = paper_audit["complete"]
+    audit["paper_timing_errors"] = paper_audit["errors"]
+    audit["measurement_complete"] = audit["measurement_complete"] and paper_audit["complete"]
     audit["incomplete_paper_attempts"] = sum(not r["complete"] for r in paper_times)
     (args.out / "measurement_audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
     if bench:

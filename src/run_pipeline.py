@@ -457,14 +457,18 @@ def run(
     paper_times = PaperTimings(ids, data_root, work_dir, references)
     try:
         log.info("run %s: %d IDs %s -> %s", label or "", len(ids), ids[0], ids[-1])
-        disc = discover(
-            ids,
-            client,
-            data_root,
-            snapshot=snapshot,
-            refresh=refresh_metadata,
-            journal=disc_log.write,
-        )
+        discovery_started = time.perf_counter()
+        try:
+            disc = discover(
+                ids,
+                client,
+                data_root,
+                snapshot=snapshot,
+                refresh=refresh_metadata,
+                journal=disc_log.write,
+            )
+        finally:
+            discovery_s = time.perf_counter() - discovery_started
         found, missing, discovery_s = disc.found, disc.missing, disc.elapsed_s
         state = load_version_state(work_dir / "versions.jsonl")
         todo = [

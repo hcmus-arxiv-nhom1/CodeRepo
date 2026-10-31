@@ -262,7 +262,7 @@ def timing_audit(local: Path) -> dict:
     unfinished = [
         p.name for p in profiles if p.is_dir() and not (p / "profile_summary.json").exists()
     ]
-    from src.analysis.measurement_exports import paper_attempt_rows
+    from src.analysis.measurement_exports import paper_timing_report
     from src.benchmark.measurements import session_report
 
     sessions, _ = session_report(local)
@@ -272,10 +272,8 @@ def timing_audit(local: Path) -> dict:
         if manifest_path.exists()
         else []
     )
-    papers = paper_attempt_rows([local / "work"], required)
-    paper_complete = bool(required) and set(required) <= {
-        r["arxiv_id"] for r in papers if r["complete"]
-    }
+    _, paper_audit = paper_timing_report([local / "work"], required)
+    paper_complete = paper_audit["complete"]
     result = dict(
         timing_complete=bool(profiles)
         and not unfinished
@@ -284,6 +282,7 @@ def timing_audit(local: Path) -> dict:
         unfinished_profiles=sorted(unfinished),
         measurement_complete=sessions["complete"],
         paper_timing_complete=paper_complete,
+        paper_timing_errors=paper_audit["errors"],
         incomplete_sessions=sessions["incomplete_sessions"],
         observed_wall_lower_bound_s=sessions["observed_wall_lower_bound_s"],
     )
@@ -313,6 +312,7 @@ def run_benchmark(
     safe_to_release = False
     child = None
     measurements = None
+    run_ready = False
     result = None
     session_start = time.perf_counter()
     try:
@@ -334,6 +334,7 @@ def run_benchmark(
         work = local / "work"
         work.mkdir(parents=True, exist_ok=True)
         write_json(work / "manifest.json", manifest)
+        run_ready = True
         write_json(
             work / f"sessions/{session_id}.json",
             dict(
@@ -478,7 +479,7 @@ def run_benchmark(
         return result
     finally:
         # A hard runtime loss cannot execute this block: only verified checkpoints survive.
-        if child is None and local.is_dir() and (local / "work/manifest.json").exists():
+        if run_ready and child is None:
             try:
                 if measurements is not None:
                     measurements.phase = "final-sync"
@@ -489,13 +490,13 @@ def run_benchmark(
             except Exception:
                 logging.exception("Final checkpoint failed; shift kept active")
                 safe_to_release = False
-        shift.close(release=safe_to_release)
+        shift.close(release=safe_to_release or not run_ready)
         if measurements is not None:
             from src.benchmark.measurements import collect_measurements
 
             measurements.finish()
             collect_measurements(local, remote)
-        if (local / "work/manifest.json").exists() and "session_id" in locals():
+        if run_ready:
             session = dict(
                 seconds_through_final_sync=time.perf_counter() - session_start,
                 shift_released=safe_to_release,

@@ -1,5 +1,8 @@
 # M1 measurement contract
 
+Restart the Colab runtime before setup. The notebook rejects cached `src` modules
+to prevent a checkout being recorded alongside Python code from another revision.
+
 The final benchmark uses CPU-only Google Colab and all 20,000 assigned IDs, all
 discovered versions and references. A sample validates measurement behavior; it is
 not the final benchmark. Use a new run ID for this implementation. Older pinned runs
@@ -48,10 +51,17 @@ profiles. `coverage.json/final_complete` requires complete corpus and timing evi
 corpus completeness alone is insufficient. Missing timing is never reconstructed
 from the time until somebody restarts Colab.
 
+Paper-event segments also validate sequence continuity and expected final counts.
+Missing/corrupt segments remain listed in the audit; export continues with valid
+evidence and suppresses exact per-paper values. Discovery that raises an exception
+still records its observed elapsed time. A hard kill without that summary remains
+incomplete evidence.
+
 ## Diagnostic measurements
 
 `pipeline_wall_time`, `pipeline_avg_paper_time`, `crawler_ram_max`, `crawler_ram_mean`
-and `chunk_disk_max` retain the narrower chunk-profiler scope. `/usr/bin/time -v`
+and `chunk_disk_max` retain the narrower chunk-profiler scope. `time_v_max_rss`
+is the new-schema name for the legacy `ram_max_main_process` diagnostic. `/usr/bin/time -v`
 wraps each chunk's profiler; its maximum RSS is a separate process-accounting
 cross-check, not the simultaneous sum of every process's RSS.
 

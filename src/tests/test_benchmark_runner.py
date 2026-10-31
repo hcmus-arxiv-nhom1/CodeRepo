@@ -58,6 +58,34 @@ def test_new_run_refuses_existing_and_resume_checks_revision(tmp_path):
         prepare_run(cfg, tmp_path, "def", resume=True)
 
 
+def test_rejected_revision_never_finalizes_or_changes_saved_run(tmp_path):
+    from src.benchmark.runner import run_benchmark
+
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    prepare_drive(drive, "team", initialize=True)
+    cfg = BenchmarkConfig("sample", "sample", ("dang",), count=1, references=False)
+    manifest = prepare_run(cfg, drive / "runs", "old", resume=False)
+    local, remote = tmp_path / "local/sample", drive / "runs/sample"
+    seed_version(local)
+    (local / "work/manifest.json").write_text(json.dumps(manifest))
+    first = Checkpoints(local, remote).save(["2604.20535"])
+    before = (local / "work/manifest.json").read_bytes()
+    with pytest.raises(ValueError, match="revision differs"):
+        run_benchmark(
+            cfg,
+            drive_root=drive,
+            local_root=tmp_path / "local",
+            revision="new",
+            team_id="team",
+            owner="dang",
+            resume=True,
+        )
+    records = list((remote / "checkpoints").glob("*.json"))
+    assert [p.stem for p in records] == [first["generation"]]
+    assert (local / "work/manifest.json").read_bytes() == before
+
+
 def seed_version(root, *, status="ok"):
     work = root / "work"
     paper = root / "data/corpus/2604-20535"

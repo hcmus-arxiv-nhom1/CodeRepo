@@ -137,7 +137,7 @@ class SessionMeasurements:
                         continue  # torn event remains an incomplete attempt
                 self._publish(
                     f"papers-{self.paper_sequence:06d}.json",
-                    dict(rows=papers, sha256=rows_digest(papers)),
+                    dict(sequence=self.paper_sequence, rows=papers, sha256=rows_digest(papers)),
                 )
                 self.paper_sequence += 1
                 self.paper_offset += len(complete)
@@ -173,6 +173,7 @@ class SessionMeasurements:
             complete=True,
             wall_s=self.rows[-1]["t_sec"],
             segments=self.sequence,
+            paper_segments=self.paper_sequence,
             ended_at=datetime.now(UTC).isoformat(),
             output_bytes=dir_size(self.local / "data/corpus"),
             **summarize_samples(self.rows),
