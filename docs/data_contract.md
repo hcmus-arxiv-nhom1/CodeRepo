@@ -96,7 +96,7 @@ The paper-level fields describe the latest version and map to the `papers` table
 | `work/profile/<chunk>/time_v.log` | `/usr/bin/time -v` | Cross-check of wall time and peak RSS |
 | `work/qa_report.csv` | `src/qa/validate.py` | `arxiv_id, version, severity (error/warning), check, detail` |
 
-**Benchmark over several chunks.** The official crawl of all 20,000 IDs is the benchmark and runs in chunks of 500 IDs across Colab sessions. `stats.py` aggregates every `profile_summary.json` under `work/profile/`: wall time = sum of the chunks' wall times, peak RAM / peak disk = maximum, mean RAM = duration-weighted mean, output size = final size of the corpus.
+**Benchmark over several chunks.** The official crawl covers all 20,000 IDs, with a default chunk size of 100 across Colab sessions. The [measurement contract](measurements.md) defines full-session wall/RAM/disk, per-paper attempt latency, independent durable telemetry and interrupted-tail lower bounds. Chunk profiles are retained as narrower diagnostics; their sum excludes runner work outside chunks. New CSVs `corpus_summary.csv`, `paper_attempt_timings.csv` and `measurement_audit.json` supplement the existing exports. `n_refs_meta_complete` counts citations having S2 ID, title, authors and date/year; `n_refs_meta_ok` retains its legacy S2-ID-only meaning.
 
 ## 6. Mapping to the Hugging Face tables (M3)
 

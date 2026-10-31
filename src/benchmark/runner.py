@@ -262,8 +262,30 @@ def timing_audit(local: Path) -> dict:
     unfinished = [
         p.name for p in profiles if p.is_dir() and not (p / "profile_summary.json").exists()
     ]
+    from src.analysis.measurement_exports import paper_attempt_rows
+    from src.benchmark.measurements import session_report
+
+    sessions, _ = session_report(local)
+    manifest_path = local / "work/manifest.json"
+    required = (
+        json.loads(manifest_path.read_text(encoding="utf-8")).get("required_ids", [])
+        if manifest_path.exists()
+        else []
+    )
+    papers = paper_attempt_rows([local / "work"], required)
+    paper_complete = bool(required) and set(required) <= {
+        r["arxiv_id"] for r in papers if r["complete"]
+    }
     result = dict(
-        timing_complete=bool(profiles) and not unfinished, unfinished_profiles=sorted(unfinished)
+        timing_complete=bool(profiles)
+        and not unfinished
+        and sessions["complete"]
+        and paper_complete,
+        unfinished_profiles=sorted(unfinished),
+        measurement_complete=sessions["complete"],
+        paper_timing_complete=paper_complete,
+        incomplete_sessions=sessions["incomplete_sessions"],
+        observed_wall_lower_bound_s=sessions["observed_wall_lower_bound_s"],
     )
     write_json(local / "work/timing_audit.json", result)
     return result
@@ -290,9 +312,20 @@ def run_benchmark(
     local, remote = local_root / cfg.run_id, drive_root / "runs" / cfg.run_id
     safe_to_release = False
     child = None
+    measurements = None
+    result = None
     session_start = time.perf_counter()
     try:
         manifest = prepare_run(cfg, drive_root / "runs", revision, resume=resume)
+        from src.benchmark.measurements import SessionMeasurements
+
+        session_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+        if not resume and local.exists():
+            raise FileExistsError("Local run directory exists; use a new run ID")
+        measurements = SessionMeasurements(
+            local_root / ".measurements" / cfg.run_id / session_id, remote, local, session_id
+        )
+        measurements.start()
         cp = Checkpoints(local, remote)
         if resume:
             cp.restore()  # fresh local destination required; never delete existing data
@@ -301,7 +334,6 @@ def run_benchmark(
         work = local / "work"
         work.mkdir(parents=True, exist_ok=True)
         write_json(work / "manifest.json", manifest)
-        session_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
         write_json(
             work / f"sessions/{session_id}.json",
             dict(
@@ -321,6 +353,7 @@ def run_benchmark(
         last_exit = None
         for chunk in chunks:
             shift.check()
+            measurements.check()
             if time.perf_counter() - session_start >= session_budget_s:
                 print(
                     "Session budget reached: checkpoint and resume in a fresh runtime.", flush=True
@@ -379,10 +412,12 @@ def run_benchmark(
             if Path("/usr/bin/time").is_file():
                 cmd = ["/usr/bin/time", "-v", "-o", str(prof / "time_v.log"), *cmd]
             print(f"=== {chunk.owner} offset={chunk.offset} IDs={len(chunk.ids)} ===", flush=True)
+            measurements.phase = "crawl-chunk"
             child = subprocess.Popen(cmd, start_new_session=sys.platform != "win32")
             try:
                 while child.poll() is None:
                     shift.check()
+                    measurements.check()
                     time.sleep(1)
             except BaseException:
                 # Stop the entire profiler/crawler process tree before checkpointing.
@@ -411,6 +446,7 @@ def run_benchmark(
             # Child may have published periodic checkpoints; refresh the parent index.
             cp = Checkpoints(local, remote)
             sync_start = time.perf_counter()
+            measurements.phase = "post-chunk-sync"
             checkpoint = cp.save(list(chunk.ids), phase="post-chunk")
             sync_s = time.perf_counter() - sync_start
             with (work / "attempts.jsonl").open("a", encoding="utf-8") as fh:
@@ -430,6 +466,7 @@ def run_benchmark(
                 raise RuntimeError(f"Chunk exit {code}; inspect work/run.log, then resume")
             if not _chunk_complete(chunk, local, cfg.references):
                 raise RuntimeError("Chunk QA incomplete; evidence retained, resume to retry")
+        measurements.phase = "qa-and-reports"
         result = coverage(cfg, local)
         result["final_corpus_complete"] = result["final_complete"]
         result.update(timing_audit(local))
@@ -443,6 +480,8 @@ def run_benchmark(
         # A hard runtime loss cannot execute this block: only verified checkpoints survive.
         if child is None and local.is_dir() and (local / "work/manifest.json").exists():
             try:
+                if measurements is not None:
+                    measurements.phase = "final-sync"
                 Checkpoints(local, remote).save(
                     [i for c in plan_chunks(cfg) for i in c.ids], phase="final"
                 )
@@ -451,6 +490,11 @@ def run_benchmark(
                 logging.exception("Final checkpoint failed; shift kept active")
                 safe_to_release = False
         shift.close(release=safe_to_release)
+        if measurements is not None:
+            from src.benchmark.measurements import collect_measurements
+
+            measurements.finish()
+            collect_measurements(local, remote)
         if (local / "work/manifest.json").exists() and "session_id" in locals():
             session = dict(
                 seconds_through_final_sync=time.perf_counter() - session_start,
@@ -460,6 +504,17 @@ def run_benchmark(
             write_json(local / f"work/session_totals/{session_id}.json", session)
             if safe_to_release:
                 write_json(remote / f"sessions/{session_id}.json", session)
+            if result is None:
+                result = (
+                    json.loads((local / "work/coverage.json").read_text())
+                    if (local / "work/coverage.json").exists()
+                    else {}
+                )
+            result.update(timing_audit(local))
+            result["final_complete"] = (
+                result.get("final_corpus_complete", False) and result["timing_complete"]
+            )
+            write_json(local / "work/coverage.json", result)
             # Include the last checkpoint event and session total in the downloadable ZIP.
             export_evidence(cfg, local)
 

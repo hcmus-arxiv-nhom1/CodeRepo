@@ -249,6 +249,12 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(tmp_path, 
     )
     assert result["complete"] and not result["final_complete"]
     assert (tmp_path / "local/smoke/bench_results.zip").is_file()
+    from src.benchmark.measurements import session_report
+
+    measured, _ = session_report(tmp_path / "local/smoke")
+    assert measured["complete"] and measured["wall_s"] > 0
+    assert measured["rss_max_bytes"] > 0
+    assert result["timing_complete"] and result["measurement_complete"]
     restored = tmp_path / "restored"
     Checkpoints(restored, drive / "runs/smoke").restore()
     assert (restored / "work/coverage.json").is_file()

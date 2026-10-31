@@ -292,4 +292,7 @@ class Checkpoints:
             except (ValueError, OSError):
                 continue
             write_json(self.local / "work/session_totals" / path.name, session)
+        from src.benchmark.measurements import collect_measurements
+
+        collect_measurements(self.local, self.remote)
         return chain[-1]

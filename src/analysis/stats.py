@@ -45,6 +45,7 @@ PAPER_COLUMNS = [
     "n_refs_total",
     "n_refs_arxiv",
     "n_refs_meta_ok",
+    "n_refs_meta_complete",
     "ref_status",
     "process_sec",
 ]
@@ -122,6 +123,10 @@ def paper_row(arxiv_id: str, data_root: Path, state: dict) -> dict:
     row["n_refs_total"] = len(items)
     row["n_refs_arxiv"] = sum(1 for r in items if r.get("arxiv_id"))
     row["n_refs_meta_ok"] = sum(1 for r in items if r.get("s2_id"))
+    row["n_refs_meta_complete"] = sum(
+        bool(r.get("s2_id") and r.get("title") and r.get("authors") and r.get("submission_date"))
+        for r in items
+    )
     return row
 
 
@@ -388,8 +393,51 @@ def main(argv: list[str] | None = None) -> int:
     rows = [paper_row(i, args.data_root, state) for i in ids]
     write_csv(args.out / "papers_stats.csv", rows, PAPER_COLUMNS)
     write_csv(args.out / "references_stats.csv", references_rows(ids, rows, work_dirs))
+    from src.analysis.measurement_exports import (
+        PAPER_TIMING_COLUMNS,
+        paper_attempt_rows,
+        session_exports,
+    )
+
+    paper_times = paper_attempt_rows(work_dirs, ids)
+    write_csv(args.out / "paper_attempt_timings.csv", paper_times, PAPER_TIMING_COLUMNS)
+    complete = [r for r in rows if r["n_versions"] > 0 and r["n_versions_ok"] == r["n_versions"]]
+    n = len(ids)
+    refs = sum(r["n_refs_total"] for r in rows)
+    corpus_metrics = {
+        "required_ids": (n, "papers"),
+        "papers_complete": (len(complete), "papers"),
+        "source_completion_rate_pct": (100 * len(complete) / n if n else 0, "% of required IDs"),
+        "papers_with_tex": (sum(r["has_source"] for r in rows), "papers"),
+        "mean_size_before_bytes": (
+            sum(r["size_before_bytes"] for r in rows) / n if n else 0,
+            "bytes/required ID",
+        ),
+        "mean_size_after_bytes": (
+            sum(r["size_after_bytes"] for r in rows) / n if n else 0,
+            "bytes/required ID",
+        ),
+        "mean_references": (refs / n if n else 0, "references/required ID"),
+        "reference_list_success_pct": (
+            100 * sum(r["ref_status"] == "ok" for r in rows) / n if n else 0,
+            "% of required IDs",
+        ),
+        "references_resolved_s2_id_rate_pct": (
+            100 * sum(r["n_refs_meta_ok"] for r in rows) / refs if refs else None,
+            "% of citations",
+        ),
+        "references_metadata_complete_rate_pct": (
+            100 * sum(r["n_refs_meta_complete"] for r in rows) / refs if refs else None,
+            "% of citations: S2 ID + title + authors + date/year",
+        ),
+    }
+    write_csv(
+        args.out / "corpus_summary.csv",
+        [dict(metric=k, value=v, unit=u) for k, (v, u) in corpus_metrics.items()],
+    )
 
     written = ["papers_stats.csv", "references_stats.csv"]
+    bench, samples = [], []
     dirs = profile_dirs(args.profile_dir or work_dirs[0] / "profile")
     if dirs:
         agg, samples = aggregate_profiles(dirs, args.time_log)
@@ -413,9 +461,33 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             ]
         )
+    session_metrics, session_samples, audit = session_exports(work_dirs, args.data_root, len(ids))
+    if session_metrics:
+        renamed = {
+            "wall_time_e2e": "pipeline_wall_time",
+            "avg_paper_time": "pipeline_avg_paper_time",
+            "ram_max": "crawler_ram_max",
+            "ram_mean": "crawler_ram_mean",
+            "disk_max": "chunk_disk_max",
+            "output_size": "chunk_output_size",
+        }
+        for metric in bench:
+            metric["metric"] = renamed.get(metric["metric"], metric["metric"])
+        bench.extend(session_metrics)
+        samples = session_samples
+    audit["papers_with_completed_lifecycle"] = len(
+        {r["arxiv_id"] for r in paper_times if r["complete"]}
+    )
+    audit["incomplete_paper_attempts"] = sum(not r["complete"] for r in paper_times)
+    (args.out / "measurement_audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
+    if bench:
         write_csv(args.out / "benchmark_summary.csv", bench)
-        write_csv(args.out / "resource_timeseries.csv", samples)
-        written += ["benchmark_summary.csv", f"resource_timeseries.csv ({len(dirs)} profile(s))"]
+        write_csv(
+            args.out / "resource_timeseries.csv",
+            samples,
+            list(samples[0]) if samples else ["t_sec", "rss_total_mb", "disk_mb"],
+        )
+        written += ["benchmark_summary.csv", "resource_timeseries.csv"]
 
     ok = sum(r["n_versions"] > 0 and r["n_versions_ok"] == r["n_versions"] for r in rows)
     print(f"{len(ids)} IDs, {ok} papers complete -> {args.out}: {', '.join(written)}")
