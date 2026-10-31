@@ -217,3 +217,17 @@ def test_missing_middle_paper_segment_cannot_certify_source_work(tmp_path, monke
     rows, audit = paper_timing_report([fresh / "work"], ["x"])
     assert not audit["complete"] and audit["errors"]
     assert rows[0]["source_work_s"] is None
+
+
+def test_drive_failure_still_finalizes_measurements_locally(tmp_path, monkeypatch):
+    from src.benchmark.measurements import session_report
+
+    sample, clock, memory, local, remote = monitor(tmp_path, monkeypatch)
+    sample.sample()
+    clock.sleep(10)
+    sample.error = OSError("Drive disconnected")
+    summary = sample.finish()
+    assert not summary["complete"]
+    report, rows = session_report(local)
+    assert not report["complete"] and report["observed_wall_lower_bound_s"] >= 10
+    assert rows and list((local / "work/measurements").glob("*/summary.json"))

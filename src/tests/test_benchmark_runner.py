@@ -221,7 +221,10 @@ def test_same_owner_second_session_still_requires_explicit_takeover(tmp_path):
     second.close(release=True)
 
 
-def test_run_orchestrator_profiles_checks_and_exports_without_network(tmp_path, monkeypatch):
+@pytest.mark.parametrize("readback_failure", [False, True])
+def test_run_orchestrator_profiles_checks_and_exports_without_network(
+    tmp_path, monkeypatch, readback_failure
+):
     from src.benchmark import runner
     from src.tests import test_run_pipeline as fixture
 
@@ -267,6 +270,29 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(tmp_path, 
     cfg = BenchmarkConfig(
         "smoke", "sample", ("dang",), count=1, references=False, checkpoint_s=0.000001
     )
+    if readback_failure:
+        from src.benchmark.measurements import SessionMeasurements, session_report
+
+        publish = SessionMeasurements._publish
+
+        def failed_readback(self, name, value):
+            publish(self, name, value)
+            if name == "summary.json":
+                raise OSError("Drive summary read-back failed")
+
+        monkeypatch.setattr(SessionMeasurements, "_publish", failed_readback)
+        with pytest.raises(RuntimeError, match="Cleanup errors"):
+            runner.run_benchmark(
+                cfg,
+                drive_root=drive,
+                local_root=tmp_path / "local",
+                revision="abc",
+                team_id="team",
+                owner="dang",
+            )
+        measured, _ = session_report(tmp_path / "local/smoke")
+        assert not measured["complete"]
+        return
     result = runner.run_benchmark(
         cfg,
         drive_root=drive,
@@ -287,3 +313,92 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(tmp_path, 
     Checkpoints(restored, drive / "runs/smoke").restore()
     assert (restored / "work/coverage.json").is_file()
     assert json.loads((drive / "SHIFT.json").read_text())["released"]
+
+
+def test_missing_shift_does_not_mask_original_error_or_prevent_local_evidence(
+    tmp_path, monkeypatch
+):
+    from src.benchmark import runner
+
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    prepare_drive(drive, "team", initialize=True)
+    original = Checkpoints.save
+
+    def failed(cp, ids, **kwargs):
+        if kwargs.get("phase") == "prelaunch":
+            (drive / "SHIFT.json").unlink()
+            raise ValueError("original chunk failure")
+        return original(cp, ids, **kwargs)
+
+    monkeypatch.setattr(Checkpoints, "save", failed)
+    cfg = BenchmarkConfig("failed", "sample", ("dang",), count=1, references=False)
+    with pytest.raises(ValueError, match="original chunk failure"):
+        runner.run_benchmark(
+            cfg,
+            drive_root=drive,
+            local_root=tmp_path / "local",
+            revision="abc",
+            team_id="team",
+            owner="dang",
+        )
+    local = tmp_path / "local/failed"
+    assert (local / "bench_results.zip").is_file()
+    errors = json.loads((local / "work/cleanup_errors.json").read_text())
+    assert errors["errors"]
+    assert list((local / "work/measurements").glob("*/summary.json"))
+
+
+def test_shift_read_retries_transient_disappearance_without_recreating_marker(
+    tmp_path, monkeypatch
+):
+    from src.benchmark.runner import Shift
+
+    shift = Shift(tmp_path, "dang")
+    original = Path.read_text
+    failures = [True]
+
+    def transient(path, *args, **kwargs):
+        if path == shift.path and failures:
+            failures.pop()
+            raise FileNotFoundError("temporary missing marker")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", transient)
+    shift.check()
+    assert json.loads(original(shift.path))["token"] == shift.token
+
+
+def test_export_failure_keeps_primary_error_and_creates_raw_rescue(tmp_path, monkeypatch):
+    from zipfile import ZipFile
+
+    from src.benchmark import runner
+
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    prepare_drive(drive, "team", initialize=True)
+    original = Checkpoints.save
+
+    def failed(cp, ids, **kwargs):
+        if kwargs.get("phase") == "prelaunch":
+            raise ValueError("original failure")
+        return original(cp, ids, **kwargs)
+
+    def no_export(*a):
+        raise RuntimeError("stats export failed")
+
+    monkeypatch.setattr(Checkpoints, "save", failed)
+    monkeypatch.setattr(runner, "export_evidence", no_export)
+    cfg = BenchmarkConfig("failed", "sample", ("dang",), count=1, references=False)
+    with pytest.raises(ValueError, match="original failure"):
+        runner.run_benchmark(
+            cfg,
+            drive_root=drive,
+            local_root=tmp_path / "local",
+            revision="abc",
+            team_id="team",
+            owner="dang",
+        )
+    with ZipFile(tmp_path / "local/failed/rescue_results.zip") as archive:
+        assert "work/cleanup_errors.json" in archive.namelist()
+        assert "work/manifest.json" in archive.namelist()

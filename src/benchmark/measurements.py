@@ -66,6 +66,7 @@ class SessionMeasurements:
         self.stop = threading.Event()
         self.thread: threading.Thread | None = None
         self.error: Exception | None = None
+        self.publish_remote = True
         self.proc = psutil.Process(os.getpid())
         self.stage.mkdir(parents=True, exist_ok=False)
         self.remote.mkdir(parents=True, exist_ok=False)
@@ -86,6 +87,10 @@ class SessionMeasurements:
 
     def _publish(self, name: str, value: dict) -> None:
         write_json(self.stage / name, value)
+        if not self.publish_remote:
+            return
+        if not self.remote.is_dir():
+            raise FileNotFoundError("Telemetry destination disappeared; refusing to recreate it")
         write_json(self.remote / name, value)
         if json.loads((self.remote / name).read_text(encoding="utf-8")) != value:
             raise OSError("Telemetry read-back verification failed")
@@ -162,15 +167,23 @@ class SessionMeasurements:
         if self.error:
             raise RuntimeError("Session telemetry failed; measurements incomplete") from self.error
 
-    def finish(self) -> dict:
+    def finish(self, *, publish_remote: bool = True) -> dict:
         self.stop.set()
         if self.thread is not None:
             self.thread.join()
-        self.check()
-        self.sample(final=True)
-        self.flush()
+        failure = self.error
+        if not publish_remote and failure is None:
+            failure = OSError("Remote finalization disabled after shift/checkpoint failure")
+        self.publish_remote = publish_remote and failure is None
+        try:
+            self.sample(final=True)
+            self.flush()
+        except Exception as exc:
+            failure = exc
+            self.publish_remote = False
+            self.flush()  # preserve buffered rows even while Drive is unavailable
         summary = dict(
-            complete=True,
+            complete=failure is None,
             wall_s=self.rows[-1]["t_sec"],
             segments=self.sequence,
             paper_segments=self.paper_sequence,
@@ -178,7 +191,15 @@ class SessionMeasurements:
             output_bytes=dir_size(self.local / "data/corpus"),
             **summarize_samples(self.rows),
         )
-        self._publish("summary.json", summary)
+        if failure is not None:
+            summary["telemetry_error"] = f"{type(failure).__name__}: {failure}"
+        try:
+            self._publish("summary.json", summary)
+        except Exception as exc:
+            summary.update(complete=False, telemetry_error=f"{type(exc).__name__}: {exc}")
+            write_json(self.stage / "summary.json", summary)
+        target = self.local / "work/measurements" / self.session_id
+        shutil.copytree(self.stage, target, dirs_exist_ok=True)
         return summary
 
 

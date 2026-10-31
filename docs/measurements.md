@@ -78,6 +78,22 @@ marked as legacy in the measurement audit.
 
 ## Before optimizing
 
+If the Drive shift marker disappears, the runner retries the read briefly and then
+stops without recreating/claiming the marker. Losing ownership or Drive visibility
+prevents final remote checkpoint publication. Cleanup errors are recorded separately
+in `work/cleanup_errors.json`, with the original exception preserved.
+
+Local measurement finalization and evidence export are still attempted. Buffered
+telemetry is copied from local staging into `work/measurements`; failed remote
+publication remains incomplete evidence. If normal statistics export fails,
+`rescue_results.zip` preserves raw local work/data/staging without contacting Drive.
+Child stdout/stderr is retained in each profile's `console.log`, including errors
+that occur before the crawler can initialize `run.log`.
+
+Download local evidence before resetting a failed runtime. A successful local rescue
+does not imply that its files were uploaded to Drive. Diagnose the original error
+and QA before deciding whether/how to resume; do not restart a large sample blindly.
+
 Run a new 200-ID sample with the same IDs, all versions and references. Also test a
 graceful session-budget handoff/resume and an intentional runtime loss on a separate
 small sample; verify restore and incomplete-timing reporting. Retain the original
