@@ -38,6 +38,18 @@ corpus checkpoints. This is a target, not a maximum-loss guarantee: Drive can fa
 or stall. Staging stays outside the restore destination so restore can use a fresh
 directory while RAM/disk/time are already being observed.
 
+The corpus checkpoint itself is a plain mirror, not an archive: completed version
+files, metadata/references and the `work/` journal are copied as real files/folders
+under `runs/<RUN_ID>/` on Drive (M2 reads the corpus there directly, no unzip step).
+Each file is copied through a temp name and read back hash-verified before an atomic
+rename, so a kill mid-copy can never corrupt a file already on Drive. `INDEX.json`
+(the manifest of every mirrored file's hash, plus the version-directory list) is
+replaced last; a kill between file copies just leaves it pointing at the previous,
+still-valid, state. Restore re-verifies every file's hash against `INDEX.json` before
+copying it back and raises if any mismatch; there is no older generation to fall back
+to, so a corrupted mirrored file blocks restore until it is removed from Drive and
+re-checkpointed, instead of silently restoring stale data.
+
 Restore overlays independent telemetry after verifying the corpus checkpoint.
 Reports deduplicate paper events copied both through checkpoints and telemetry.
 Completed versions may need replay after an interruption; their earlier measured
