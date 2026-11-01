@@ -298,6 +298,9 @@ def discovery_seconds(work_dirs: list[Path]) -> float | None:
     """Total discovery time over every run recorded in runs.jsonl (one run per chunk)."""
     total, seen = 0.0, False
     for work_dir in work_dirs:
+        for preparation in (work_dir / "snapshot_preparation").glob("*.json"):
+            total += json.loads(preparation.read_text(encoding="utf-8"))["preparation_s"]
+            seen = True
         path = work_dir / "runs.jsonl"
         if path.exists():
             for line in path.read_text(encoding="utf-8").splitlines():
@@ -323,7 +326,12 @@ def benchmark_rows(
     chunks = f"sum over {agg['chunks']} chunk(s)"
     rows = [
         ("wall_time_e2e", agg.get("wall_s"), "s", f"src/utils/profiler.py, {chunks}"),
-        ("discovery_time", discovery_s, "s", "time.perf_counter, runs.jsonl"),
+        (
+            "discovery_time",
+            discovery_s,
+            "s",
+            "time.perf_counter, runs.jsonl + snapshot_preparation",
+        ),
         (
             "avg_paper_time",
             round(agg["wall_s"] / n_ids, 3) if agg.get("wall_s") and n_ids else None,

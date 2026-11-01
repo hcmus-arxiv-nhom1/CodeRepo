@@ -7,6 +7,11 @@ of each version, then write ``<data_root>/<yymm-id>/metadata.json``::
     {"arxiv_id", "title", "authors": [...], "submission_date", "revised_dates": [...],
      "venue", "num_versions", "categories": [...], "doi"}
 
+When a Kaggle snapshot is supplied, valid records seed the base-paper entries and
+all version dates before network discovery. Only absent/invalid records need base-ID
+API/OAI fallback. Historical version titles/authors still use versioned API queries;
+unknown values remain null. Coverage is frozen as of the supplied snapshot.
+
 Dates are ISO 8601 UTC strings (``2026-06-30T17:59:57Z``); ``venue`` is the journal-ref
 (nullable). Sources, all through the shared arXiv limiter:
 
@@ -199,14 +204,27 @@ def load_snapshot(path: Path, wanted: Iterable[str]) -> dict[str, dict]:
     """Stream the Kaggle snapshot (several GB) line by line, keeping only ``wanted`` IDs."""
     wanted = set(wanted)
     found = {}
-    prefix = '{"id":"'
+    id_pattern = re.compile(r'"id"\s*:\s*"([^"\\]+)"')
     with open(path, encoding="utf-8") as fh:
         for line in fh:
-            if not line.startswith(prefix):
+            match = id_pattern.search(line)
+            if match is None:
                 continue
-            arxiv_id = line[len(prefix) : line.index('"', len(prefix))]
+            arxiv_id = match[1]
             if arxiv_id in wanted:
-                found[arxiv_id] = parse_snapshot_line(line)
+                try:
+                    rec = parse_snapshot_line(line)
+                    n = len(rec["versions"])
+                    if not n or sorted(rec["versions"]) != list(range(1, n + 1)):
+                        raise ValueError("Incomplete version history")
+                    if not rec["title"] or not rec["authors"]:
+                        raise ValueError("Missing title/authors")
+                except (ValueError, KeyError, TypeError, AttributeError, OverflowError) as exc:
+                    log.warning(
+                        "Invalid snapshot record %s; using network fallback: %s", arxiv_id, exc
+                    )
+                    continue
+                found[arxiv_id] = rec
                 if len(found) == len(wanted):
                     break
     return found
@@ -303,7 +321,20 @@ def discover(
 
     # 1. Base IDs through the API. One retry for IDs a batch did not return or a cut feed;
     #    IDs of a batch arXiv refused (FetchError) skip the retry and go straight to OAI.
-    entries: dict[str, ApiEntry] = {}
+    entries: dict[str, ApiEntry] = {
+        i: ApiEntry(
+            arxiv_id=i,
+            version=max(r["versions"]),
+            title=r["title"],
+            authors=r["authors"],
+            published=r["versions"][1],
+            updated=r["versions"][max(r["versions"])],
+            journal_ref=r["journal_ref"],
+            doi=r["doi"],
+            categories=r["categories"],
+        )
+        for i, r in snap.items()
+    }
     refused: set[str] = set()
     for attempt in (1, 2):
         pending = [i for i in todo if i not in entries and i not in refused]
@@ -341,7 +372,8 @@ def discover(
         try:
             for e in api_query(client, batch):
                 if e.arxiv_id in dates:
-                    dates[e.arxiv_id][e.version] = e.updated
+                    if e.arxiv_id not in snap:
+                        dates[e.arxiv_id][e.version] = e.updated
                     per_version[e.arxiv_id][e.version] = e
         except FetchError as exc:  # refused: the papers still short of dates go to OAI below
             result.api_failed_batches += 1
@@ -372,7 +404,9 @@ def discover(
     for arxiv_id in todo:
         if arxiv_id in entries:
             e = entries[arxiv_id]
-            source = "api+snapshot" if arxiv_id in snap else "api"
+            source = "snapshot" if arxiv_id in snap else "api"
+            if arxiv_id in snap and len(per_version[arxiv_id]) > 1:
+                source += "+api-versions"
             versions = dates[arxiv_id]
             n = e.version
             if arxiv_id in oai:

@@ -218,8 +218,9 @@ def test_same_owner_second_session_still_requires_explicit_takeover(tmp_path):
 
 
 @pytest.mark.parametrize("readback_failure", [False, True])
+@pytest.mark.parametrize("snapshot_enabled", [False, True])
 def test_run_orchestrator_profiles_checks_and_exports_without_network(
-    tmp_path, monkeypatch, readback_failure
+    tmp_path, monkeypatch, readback_failure, snapshot_enabled
 ):
     from src.benchmark import runner
     from src.tests import test_run_pipeline as fixture
@@ -235,6 +236,9 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(
     class FinishedProcess:
         def __init__(self, command, **kwargs):
             payload = json.loads(Path(command[-1]).read_text())
+            if snapshot_enabled:
+                assert Path(payload["snapshot"]).name == "snapshot_index.jsonl"
+                assert Path(payload["snapshot"]).is_file()
             profile = Path(command[command.index("--out") + 1])
             before_launch = tmp_path / "before-launch"
             Checkpoints(before_launch, drive / "runs/smoke").restore()
@@ -263,8 +267,25 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(
             return self.returncode
 
     monkeypatch.setattr(runner.subprocess, "Popen", FinishedProcess)
+    snapshot_path = tmp_path / "snapshot.jsonl"
+    snapshot_path.write_text(
+        json.dumps(
+            dict(
+                id="2604.20535",
+                title="T",
+                authors="Ada",
+                versions=[dict(version="v1", created="2026-04-01T00:00:00Z")],
+            )
+        )
+    )
     cfg = BenchmarkConfig(
-        "smoke", "sample", ("dang",), count=1, references=False, checkpoint_s=0.000001
+        "smoke",
+        "sample",
+        ("dang",),
+        count=1,
+        references=False,
+        checkpoint_s=0.000001,
+        snapshot=str(snapshot_path) if snapshot_enabled else None,
     )
     if readback_failure:
         from src.benchmark.measurements import SessionMeasurements, session_report

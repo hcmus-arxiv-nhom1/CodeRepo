@@ -111,3 +111,14 @@ graceful session-budget handoff/resume and an intentional runtime loss on a sepa
 small sample; verify restore and incomplete-timing reporting. Retain the original
 200-ID baseline untouched. The fake-response test suite does not replace a live
 Colab/Drive smoke test.
+
+## Snapshot-first discovery measurements
+
+With BenchmarkConfig.snapshot enabled, the input SHA-256 is part of the run manifest.
+work/snapshot_index.jsonl is a compact, checksum-verified subset of all selected IDs;
+work/snapshot_preparation/<session>.json records subset preparation or reuse costs.
+These costs are included in session wall/RAM/disk sampling and added once per session to
+the discovery_time CSV metric, in addition to per-chunk discovery_s. Do not add them again
+to session wall time. Input manifest hashing plus Kaggle download/unzip are pre-session
+setup costs and are disclosed separately. Historical version title/author API requests
+remain in per-chunk discovery time. Coverage is relative to the recorded snapshot release.

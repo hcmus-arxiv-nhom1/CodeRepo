@@ -103,7 +103,7 @@ python -m src.run_pipeline --ids 2606.30762,2607.00001
 - **Resume:** after an interruption (lost Colab session, Ctrl+C, kill) run **the same command** again: finished versions are skipped, failed ones retried. On Colab, sync both `data/corpus/` **and** `work/`, otherwise there is nothing to resume from.
 - `--month-end YYMM=N`: last sequence number of a month the range crosses. June 2026 was confirmed with the API as `2606.32040` (stored in `config.MONTH_END`).
 - `--keep-ext .tex,.bib,.bbl`: change the kept extensions (default `.tex,.bib`, as required by M1).
-- `--snapshot <file>`: optional Kaggle snapshot for version dates.
+- `--snapshot <file>`: optional Kaggle snapshot-first discovery, with API enrichment for historical versions.
 - `--no-references`: skip Semantic Scholar; `--refresh-metadata`: run discovery again for IDs that already have `metadata.json`.
 
 ### How the crawler calls arXiv
@@ -180,3 +180,29 @@ Online documents the crawler and the gathering code rely on:
 6. Cornell University. (2025). *arXiv Dataset*. Kaggle. https://www.kaggle.com/datasets/Cornell-University/arxiv — optional Kaggle snapshot (`--snapshot`).
 7. Allen Institute for AI. (2026). *Semantic Scholar Academic Graph API*. https://api.semanticscholar.org/api-docs/ — `paper/batch`, `paper/{id}/references` and rate limits used by `references.py`.
 8. Python Software Foundation. *tarfile*, *gzip*, *zipfile* — Python 3.12 standard library. https://docs.python.org/3.12/library/archiving.html — reading archives member by member without `extractall`.
+
+### Kaggle snapshot-first discovery
+
+Download and unzip `arxiv-metadata-oai-snapshot.json` before starting the benchmark. Set
+`SNAPSHOT_PATH = "/content/arxiv-metadata-oai-snapshot.json"` in the Colab notebook (or
+pass `snapshot="..."` to `BenchmarkConfig`). Use a new run ID for this code revision.
+The CLI also accepts `--snapshot ./arxiv-metadata-oai-snapshot.json`.
+
+With a snapshot configured, valid matching records supply the paper metadata and complete
+version dates without base-ID API/OAI calls. Historical version titles/authors still use
+versioned API queries; unknown historical fields remain null, never copied from the latest
+version. Missing/invalid snapshot records retain the ordinary API/OAI fallback. Version
+coverage is explicitly **as of the chosen snapshot**, not a claim of live arXiv freshness.
+
+The benchmark builds `work/snapshot_index.jsonl` once for all selected IDs. Only this small
+index and its checksum manifest are checkpointed; the original multi-GB input stays local.
+Every new session validates the input SHA-256 against `MANIFEST.json`, and verifies/reuses
+the restored index. Keep the input bytes and configured local path unchanged on resume.
+Index preparation is sampled as part of the session and added to `discovery_time` in the
+Book CSV, with per-session detail in `work/snapshot_preparation/`. Initial manifest checksum
+validation and Kaggle download/unzip happen before the session sampler and are setup costs;
+they must be disclosed separately from the measured benchmark.
+
+The notebook stays pinned to an immutable implementation commit. Local-only commits must be
+published to the configured repository before they can be fetched by a fresh web Colab runtime.
+This change keeps the existing Drive backend; Hugging Face storage is a separate step.

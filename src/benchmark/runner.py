@@ -39,6 +39,7 @@ class BenchmarkConfig:
     chunk_size: int = 100
     references: bool = True
     checkpoint_s: float = 300.0
+    snapshot: str | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,10 @@ def plan_chunks(cfg: BenchmarkConfig) -> list[Chunk]:
 def prepare_run(cfg: BenchmarkConfig, root: Path, revision: str, *, resume: bool) -> dict:
     chunks = plan_chunks(cfg)
     identity = {"config": json.loads(json.dumps(asdict(cfg))), "code_revision": revision}
+    if cfg.snapshot:
+        from src.crawler.snapshot import sha256
+
+        identity["snapshot_sha256"] = sha256(Path(cfg.snapshot))
     path = root / cfg.run_id / "MANIFEST.json"
     if resume:
         manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -238,6 +243,7 @@ def run_child(payload: dict) -> None:
         data_root=local / "data/corpus",
         work_dir=local / "work",
         references=payload["references"],
+        snapshot=Path(payload["snapshot"]) if payload.get("snapshot") else None,
         progress=False,
         label=payload["owner"],
         on_version=checkpoint,
@@ -376,6 +382,20 @@ def run_benchmark(
         )
         chunks = plan_chunks(cfg)
         all_ids = [i for c in chunks for i in c.ids]
+        snapshot_index = None
+        if cfg.snapshot:
+            from src.crawler.snapshot import prepare_snapshot_index
+
+            measurements.phase = "snapshot-index"
+            snapshot_index = work / "snapshot_index.jsonl"
+            prepared = prepare_snapshot_index(
+                cfg.snapshot,
+                all_ids,
+                snapshot_index,
+                expected_sha256=manifest["snapshot_sha256"],
+            )
+            write_json(work / f"snapshot_preparation/{session_id}.json", prepared)
+            print(f"Snapshot: {prepared['found']}/{len(all_ids)} IDs indexed", flush=True)
         # Initial durable manifest/session, even if discovery never succeeds.
         cp.save([], phase="initial")
         last_exit = None
@@ -402,6 +422,7 @@ def run_benchmark(
                 remote=str(remote),
                 checkpoint_s=cfg.checkpoint_s,
                 references=cfg.references,
+                snapshot=str(snapshot_index) if snapshot_index else None,
             )
             payload_path = work / "chunk.json"
             write_json(payload_path, payload)
