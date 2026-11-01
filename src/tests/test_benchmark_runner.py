@@ -437,3 +437,66 @@ def test_export_failure_keeps_primary_error_and_creates_raw_rescue(tmp_path, mon
     with ZipFile(tmp_path / "local/failed/rescue_results.zip") as archive:
         assert "work/cleanup_errors.json" in archive.namelist()
         assert "work/manifest.json" in archive.namelist()
+
+
+@pytest.mark.parametrize("field", ["metadata", "journal"])
+def test_drive_resume_keeps_previous_mutable_file_if_index_commit_is_interrupted(
+    tmp_path, monkeypatch, field
+):
+    from src.benchmark import checkpoints
+
+    local, remote = tmp_path / "local", tmp_path / "remote"
+    paper = seed_version(local)
+    cp = Checkpoints(local, remote)
+    cp.save(["2604.20535"])
+    file = paper / "metadata.json" if field == "metadata" else local / "work/versions.jsonl"
+    original = file.read_bytes()
+    file.write_bytes(original + (b" " if field == "metadata" else b"\n"))
+    previous_index = (remote / "INDEX.json").read_bytes()
+    write = checkpoints.write_json
+
+    def interrupted(path, value):
+        if path == remote / "INDEX.json":
+            raise OSError("runtime lost before index publish")
+        return write(path, value)
+
+    monkeypatch.setattr(checkpoints, "write_json", interrupted)
+    with pytest.raises(OSError, match="runtime lost"):
+        cp.save(["2604.20535"])
+    assert (remote / "INDEX.json").read_bytes() == previous_index
+    restored = tmp_path / "restored"
+    Checkpoints(restored, remote).restore()
+    assert (restored / file.relative_to(local)).read_bytes() == original
+
+
+def test_drive_can_publish_after_restore_from_preserved_generation(tmp_path, monkeypatch):
+    from src.benchmark import checkpoints
+
+    local, remote = tmp_path / "local", tmp_path / "remote"
+    paper = seed_version(local)
+    cp = Checkpoints(local, remote)
+    cp.save(["2604.20535"])
+    file = paper / "metadata.json"
+    original = file.read_bytes()
+    file.write_bytes(original + b" ")
+    write = checkpoints.write_json
+
+    def fail_index(path, value):
+        if path == remote / "INDEX.json":
+            raise OSError("interrupted")
+        return write(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(checkpoints, "write_json", fail_index)
+        with pytest.raises(OSError):
+            cp.save(["2604.20535"])
+    restored = tmp_path / "restored"
+    next_cp = Checkpoints(restored, remote)
+    next_cp.restore()
+    next_file = restored / file.relative_to(local)
+    assert next_file.read_bytes() == original
+    next_file.write_bytes(original + b"  ")
+    next_cp.save(["2604.20535"])
+    again = tmp_path / "again"
+    Checkpoints(again, remote).restore()
+    assert (again / file.relative_to(local)).read_bytes() == original + b"  "

@@ -106,3 +106,84 @@ def test_snapshot_cell_verifies_drive_input_before_storage(tmp_path, monkeypatch
         exec("".join(cell["source"]), values)
         assert target.read_bytes() == record
     assert source.exists(), "Never delete the Drive input"
+
+
+@pytest.mark.parametrize("toggle,expected", [(True, "huggingface"), (False, "drive")])
+def test_storage_toggle_selects_exactly_one_backend(toggle, expected):
+    path = Path(__file__).parents[1] / "notebooks/arxiv_nhom1_crawl_benchmark.ipynb"
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    config = next(c for c in cells if c.get("id") == "f94c4b6e")
+    source = "".join(config["source"]).replace(
+        "USE_HUGGINGFACE = True", f"USE_HUGGINGFACE = {toggle}"
+    )
+    values = {}
+    exec(source, values)
+    assert values["STORAGE_BACKEND"] == expected
+
+
+def test_storage_toggle_rejects_nonboolean():
+    path = Path(__file__).parents[1] / "notebooks/arxiv_nhom1_crawl_benchmark.ipynb"
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    source = "".join(next(c for c in cells if c.get("id") == "f94c4b6e")["source"])
+    with pytest.raises((TypeError, ValueError)):
+        exec(source.replace("USE_HUGGINGFACE = True", 'USE_HUGGINGFACE = "False"'), {})
+
+
+def test_drive_authorization_does_not_read_hf_secret(tmp_path, monkeypatch):
+    import sys
+
+    path = Path(__file__).parents[1] / "notebooks/arxiv_nhom1_crawl_benchmark.ipynb"
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    cell = next(c for c in cells if c.get("id") == "authorize-storage")
+
+    def forbidden(name):
+        pytest.fail(f"Drive branch must not access secret {name}")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "google.colab",
+        SimpleNamespace(
+            userdata=SimpleNamespace(get=forbidden), drive=SimpleNamespace(mount=lambda *a: None)
+        ),
+    )
+    values = {"STORAGE_BACKEND": "drive", "DRIVE_DIR": str(tmp_path)}
+    exec("".join(cell["source"]), values)
+    assert values["DRIVE"] == tmp_path
+
+
+def test_hf_authorization_reads_only_configured_secret(monkeypatch):
+    import subprocess
+    import sys
+
+    path = Path(__file__).parents[1] / "notebooks/arxiv_nhom1_crawl_benchmark.ipynb"
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    cell = next(c for c in cells if c.get("id") == "authorize-storage")
+    seen = []
+
+    def get(name):
+        seen.append(name)
+        return "fake-token"
+
+    class Api:
+        def __init__(self, token):
+            assert token == "fake-token"
+
+        def repo_info(self, repo_id, repo_type):
+            assert (repo_id, repo_type) == ("team/private", "dataset")
+            return SimpleNamespace(private=True)
+
+    monkeypatch.setitem(
+        sys.modules, "google.colab", SimpleNamespace(userdata=SimpleNamespace(get=get))
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=Api, hf_hub_download=lambda *a, **k: None),
+    )
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HF_XET_CACHE", raising=False)
+    values = {"STORAGE_BACKEND": "huggingface", "HF_REPO_ID": "team/private"}
+    exec("".join(cell["source"]), values)
+    assert seen == ["HF_TOKEN"]
+    assert "m1-hf-staging" in str(values["DRIVE"])

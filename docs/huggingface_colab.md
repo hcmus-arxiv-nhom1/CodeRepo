@@ -15,7 +15,7 @@ Open `src/notebooks/arxiv_nhom1_crawl_benchmark.ipynb` from the published
    without a local full snapshot. Copy/hash is outside benchmark time; the filtered
    file is included in disk measurements. Switching from the old full input requires
    a new RUN_ID; resume must use the identical filtered bytes/path.
-3. Keep STORAGE_BACKEND="huggingface", HF_REPO_ID="PancakeDang/arxiv-nhom1-introds",
+3. Keep USE_HUGGINGFACE=True, HF_REPO_ID="PancakeDang/arxiv-nhom1-introds",
    MODE="sample", RANGES=("dang",), COUNT=100, CHUNK_SIZE=500, RESUME=False and TAKEOVER=False.
    Use a new RUN_ID for a new experiment. The notebook is pinned to the implementation
    commit and the repository is the published DankDaPancake fork.

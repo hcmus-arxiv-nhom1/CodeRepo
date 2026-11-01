@@ -200,6 +200,10 @@ class HFCheckpoints(Checkpoints):
             raise ValueError("Unsafe HF run prefix")
         self.store, self.prefix = store, prefix.rstrip("/")
 
+    def _preserve_previous(self, source: Path, expected: str) -> None:
+        # Local staging is disposable; HF restore reads the prior pinned revision.
+        return None
+
     def save(self, ids, **kwargs):
         started = time.perf_counter()
         self.check_owner()

@@ -41,21 +41,17 @@ Never commit secrets. On Colab use **Secrets** (key icon); locally use environme
 
 ## Running on Google Colab (CPU-only)
 
-Use the single notebook [`arxiv_nhom1_crawl_benchmark.ipynb`](src/notebooks/arxiv_nhom1_crawl_benchmark.ipynb) for both sample validation and the official full crawl/benchmark. The final benchmark must cover all four assigned ranges (20,000 IDs), including every discovered version. Samples are never reported as final results.
+Open the [group crawl and benchmark notebook](src/notebooks/arxiv_nhom1_crawl_benchmark.ipynb) and select a CPU runtime. The final benchmark must cover all four assigned ranges (20,000 IDs) and their discovered versions; samples are not final results.
 
-1. Use the designated group crawl account; create `MyDrive/arxiv-nhom1` once. Set `INITIALIZE_TEAM_FOLDER=True` only for its first initialization, then leave it false. Use Colab Secrets for `ARXIV_CONTACT_EMAIL` and optional `S2_API_KEY`.
-2. Choose a CPU/None runtime. Review the immutable implementation revision printed by setup and the selected ID count before running.
-3. For a trial: use `MODE="sample"`, `RANGES=("dang",)`, `COUNT=100`, and a unique sample run ID. For final: use `MODE="final"`, all four ranges, `COUNT=None`, references enabled, and a different run ID. Default chunk size is 100.
-4. New runs refuse existing run IDs. After a runtime reset, set `RESUME=True` with the same run ID/settings. The notebook restores corpus and journals from verified Drive checkpoints using the saved code revision. No cell deletes an earlier run.
-5. Operate one group crawler at a time. Session markers remain advisory. A four-hour session budget stops between chunks; only take over a stale shift after confirming its old runtime has stopped.
+1. Upload the prepared `arxiv-assigned-20000.jsonl` to `MyDrive/arxiv-inputs/`, or edit `SNAPSHOT_DRIVE_PATH`. Both backends copy this verified input to local Colab disk.
+2. Set `USE_HUGGINGFACE=True` for the private HF Dataset and enable its writable `HF_TOKEN` Colab Secret, or set it to `False` for Drive output. For Drive create the intended team folder, initialize its `TEAM.json` once using `INITIALIZE_TEAM_FOLDER=True`, and set it false afterwards. `S2_API_KEY` and `ARXIV_CONTACT_EMAIL` are optional Colab Secrets.
+3. The default sample selects 100 Dang IDs, chunk size 500 and a new run ID. For final mode select all four ranges, set `COUNT=None` and enable references. Verify scope, revision and destination in preflight.
+4. Run one crawler at a time. Checkpoints target 300 seconds at completed-version boundaries and at chunk boundaries; long versions, storage and quota delays can extend the target. After runtime loss, confirm the old runtime stopped, then resume with the exact same run ID, backend, settings, snapshot bytes/path and saved code revision. Use takeover only for a confirmed stale shift.
+5. Inspect coverage, timing and cleanup diagnostics. Download evidence; if finalization fails, the separate rescue cell packages local raw data and logs before runtime reset. Uncommitted work may need replay.
 
-Checkpoints target 300 seconds at completed-version boundaries and also run after chunks. Only new/changed completed files are archived; archives are read back and verified before a completion record is published. If a runtime dies during upload, restore uses the latest valid chain. This does not guarantee zero lost work: long versions or failed uploads can exceed the target interval. Live Range recovery does not persist an in-flight download across destroyed runtimes.
+Drive output is under `runs/<RUN_ID>/data/corpus/` and `work/`. SHA-addressed previous mutable contents support restore after an interrupted index update; the visible mirror may be ahead of the committed index, so restore and verify before M2. HF stores raw corpus in sharded paths and uses a pinned completed revision; restore produces flat local M2 paths. See [HF setup](docs/huggingface_colab.md) and the [measurement contract](docs/measurements.md).
 
-Full-session measurements include the runner/notebook kernel and all descendants, restore, crawling, reference completion, retries, checkpoints and final corpus sync. RSS is sampled every second; local run data/work and telemetry staging disk are sampled every 30 seconds. Independent checksummed Drive telemetry targets publication every 30 seconds. The narrower chunk profiler and `/usr/bin/time -v` remain cross-checks. Setup, final evidence re-export/download and offline gaps are excluded. Missing summaries after hard runtime loss produce an observed lower bound and incomplete timing, never an invented exact benchmark.
-
-See the [measurement contract](docs/measurements.md) for scopes and formulas. The notebook displays `benchmark_summary.csv`, `corpus_summary.csv` and the measurement audit. `paper_attempt_timings.csv` retains each paper's admission-to-source/reference-readiness latency and source work, including repeated attempts. Use a **new run ID** for this measurement revision; old runs retain their original code and scope.
-
-Inspect `coverage.json` and the source/reference QA reports, then download `bench_results.zip`. The ZIP includes manifests, dependency/hardware session details, journals, logs, profiles and CSVs; corpus remains in `arxiv-nhom1/runs/<RUN_ID>/checkpoints` for M2. Restore that run with the saved implementation revision and leave source `.tex`/`.bib` files unchanged during parsing.
+Session measurements include the runner/notebook kernel and descendants, crawling, reference completion and checkpoints. RSS sampling targets one second, disk 30 seconds; independent telemetry targets 30 seconds on Drive and 120 seconds on HF. Snapshot copy and initial manifest hashing are setup outside the sampler; the filtered snapshot is included in sampled disk. Final telemetry/evidence publication and offline gaps are excluded from sampler wall. Missing session evidence is incomplete, never an invented exact benchmark.
 
 ## Docker Compose: crawler workers with one global rate limiter
 
@@ -216,3 +212,15 @@ Set `storage_backend="huggingface", hf_repo_id="PancakeDang/arxiv-nhom1-introds"
 BenchmarkConfig for programmatic use. The default Python API remains Drive-compatible.
 HF mode uses local checkpoint staging, uploads raw deltas, and restores a completed
 commit with checksum verification. Existing Drive runs must not be resumed as HF runs.
+
+
+### Notebook storage selection and recovery
+
+In the current notebook use `USE_HUGGINGFACE=True` for HF or `False` for Drive.
+The filtered snapshot is copied from Drive in both modes; this is independent of
+the output destination. Use a fresh run ID when changing backend or configuration.
+Drive checkpoint restore can fall back to verified hash-addressed prior contents when
+a write is interrupted before INDEX publication; `.checkpoint-objects` consumes
+additional Drive space. The Drive plain mirror may be ahead of its index after a kill.
+The HF backend uses a pinned revision and restores a flat local corpus for M2.
+Existing runs keep their saved revision and are not automatically upgraded.

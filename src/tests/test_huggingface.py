@@ -281,3 +281,19 @@ def test_checkpoint_does_not_reupload_unchanged_control_files(tmp_path, monkeypa
     assert "runs/smoke/work/run.log" in names
     assert "runs/smoke/MANIFEST.json" not in names
     assert "runs/smoke/sessions/s1.json" not in names
+
+
+def test_hf_revision_history_avoids_local_drive_backup_objects(tmp_path):
+    from src.benchmark.huggingface import HFCheckpoints
+
+    hub = MemoryHub()
+    local, mirror = tmp_path / "local", tmp_path / "mirror"
+    seed_version(local)
+    cp = HFCheckpoints(local, mirror, hub, "runs/smoke")
+    cp.save(["2604.20535"])
+    (local / "work/versions.jsonl").write_text((local / "work/versions.jsonl").read_text() + "\n")
+    cp.save(["2604.20535"])
+    assert not (mirror / ".checkpoint-objects").exists()
+    restored = tmp_path / "restored"
+    HFCheckpoints(restored, tmp_path / "mirror2", hub, "runs/smoke").restore()
+    assert (restored / "data/corpus/2604-20535/v1/main.tex").read_text() == "complete source"

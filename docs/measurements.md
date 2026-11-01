@@ -41,14 +41,14 @@ directory while RAM/disk/time are already being observed.
 The corpus checkpoint itself is a plain mirror, not an archive: completed version
 files, metadata/references and the `work/` journal are copied as real files/folders
 under `runs/<RUN_ID>/` on Drive (M2 reads the corpus there directly, no unzip step).
-Each file is copied through a temp name and read back hash-verified before an atomic
-rename, so a kill mid-copy can never corrupt a file already on Drive. `INDEX.json`
-(the manifest of every mirrored file's hash, plus the version-directory list) is
-replaced last; a kill between file copies just leaves it pointing at the previous,
-still-valid, state. Restore re-verifies every file's hash against `INDEX.json` before
-copying it back and raises if any mismatch; there is no older generation to fall back
-to, so a corrupted mirrored file blocks restore until it is removed from Drive and
-re-checkpointed, instead of silently restoring stale data.
+Changed committed files first preserve their old bytes as verified, content-addressed
+objects under `.checkpoint-objects/`; files are then copied through a temporary name,
+verified and replaced. `INDEX.json` is published last. If interrupted before index
+publication, restore verifies the plain mirror and falls back to the old object when
+needed. Existing checkpoints already corrupt before this revision cannot be repaired
+automatically. Objects are retained, so Drive storage can grow with updated journals.
+The visible raw mirror may be ahead of the index after interruption: restore and verify
+the committed generation before consuming it for M2.
 
 Restore overlays independent telemetry after verifying the corpus checkpoint.
 Reports deduplicate paper events copied both through checkpoints and telemetry.

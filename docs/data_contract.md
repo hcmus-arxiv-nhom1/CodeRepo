@@ -143,3 +143,10 @@ contract for M2. `INDEX.json` stores flat names, SHA-256 hashes and empty versio
 `LATEST.json` pins the last completed data commit. Independent measurements are overlaid
 from later Hub commits. Corpus source bytes and metadata are never packed into a ZIP by
 this backend. See huggingface_colab.md for setup and operator handoff.
+
+
+Drive checkpoints retain old mutable file contents in `.checkpoint-objects/<sha-prefix>/<sha>`
+before replacement. Restore verifies the `INDEX.json` hash and uses the verified object
+if the plain mirror is newer after interruption. These objects add Drive storage and are
+not raw paper files. Runs whose checkpoint was corrupted before this revision cannot be
+automatically recovered. HF uses its pinned revision rather than local Drive objects.
