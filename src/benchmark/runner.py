@@ -622,7 +622,9 @@ def run_benchmark(
         result["final_complete"] = result["final_complete"] and result["timing_complete"]
         write_json(work / "coverage.json", result)
         export_evidence(cfg, local)
-        cp.save(all_ids, phase="final-reports")
+        # HF's finally checkpoint persists these same reports before releasing the shift.
+        if hub is None:
+            cp.save(all_ids, phase="final-reports")
         safe_to_release = True
         return result
     finally:

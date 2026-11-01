@@ -327,6 +327,15 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(
         team_id="team",
         owner="dang",
     )
+    if storage_backend == "huggingface":
+        events = [
+            json.loads(line)
+            for line in (tmp_path / "local/smoke/work/checkpoint_events.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert not any(e["phase"] == "final-reports" for e in events)
+        assert any(e["phase"] == "final" for e in events)
     assert result["complete"] and not result["final_complete"]
     assert (tmp_path / "local/smoke/bench_results.zip").is_file()
     from src.benchmark.measurements import session_report

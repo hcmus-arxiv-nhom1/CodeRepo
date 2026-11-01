@@ -16,7 +16,7 @@ Open `src/notebooks/arxiv_nhom1_crawl_benchmark.ipynb` from the published
    file is included in disk measurements. Switching from the old full input requires
    a new RUN_ID; resume must use the identical filtered bytes/path.
 3. Keep STORAGE_BACKEND="huggingface", HF_REPO_ID="PancakeDang/arxiv-nhom1-introds",
-   MODE="sample", RANGES=("dang",), COUNT=100, CHUNK_SIZE=100, RESUME=False and TAKEOVER=False.
+   MODE="sample", RANGES=("dang",), COUNT=100, CHUNK_SIZE=500, RESUME=False and TAKEOVER=False.
    Use a new RUN_ID for a new experiment. The notebook is pinned to the implementation
    commit and the repository is the published DankDaPancake fork.
 4. Run setup: it checks private-Dataset read access. The first shift-claim commit checks
@@ -59,7 +59,7 @@ an empty local destination; a plain snapshot_download keeps the remote shard lay
 
 ## Checkpoint consistency
 
-Raw deltas are committed in batches of up to 100 files, with Hub parent-commit checks.
+Raw deltas are committed in batches targeting up to 500 files or 32 MiB of input, whichever comes first, with Hub parent-commit checks.
 LATEST.json is replaced only after the data INDEX.json can be read at its pinned commit.
 A partially completed upload never changes the completed pointer. Restore reads all
 corpus/journal files at the pointer revision and verifies hashes, then overlays newer
@@ -106,7 +106,8 @@ can lose up to the unpublished telemetry tail; upload/quota waits can extend it.
 
 A file-locked budget shared by parent and child permits at most 90 commit attempts
 per rolling hour in the same staging root. Raw files stay unpacked and each commit
-contains at most 100 files. The budget waits rather than exceeding its local cap.
+targets at most 500 files or 32 MiB of input. A single file larger than the byte
+   target is sent alone; raw files are never split or archived. The budget waits rather than exceeding its local cap.
 It cannot account for earlier sessions or other tools/runtimes sharing server quota.
 On HTTP 429, all local writers share a cooldown using Retry-After/RateLimit headers,
 with a conservative one-hour fallback when neither is usable; retries are bounded
@@ -119,3 +120,26 @@ logs and measurements without contacting HF. Preserve that ZIP before resetting.
 Do not label failed finalization as a clean benchmark. The notebook's RESUME option
 loads the saved implementation revision, so resuming an older manifest does not
 automatically apply this fix; use a new run ID for a clean test of the new revision.
+
+
+### Larger batches for the group's small source files
+
+The 500-file / 32-MiB target is a workload-specific experiment, above HF's usual
+50–100-file HTTP recommendation. HF documents a 60-second server validation timeout;
+bandwidth alone does not guarantee that larger commits succeed. No private-HF live
+validation was performed for this revision. HubStore accepts max_commit_files and
+max_commit_bytes overrides for smaller batches if the next smoke exposes timeouts.
+Byte sizing uses stat for source Paths and does not load all raw sources into RAM.
+
+Unchanged MANIFEST, session/checkpoint sidecars and book CSVs are skipped via a local
+hash cache. Cache state is advanced only after successful publication; deleting/loss
+of the cache causes harmless re-upload, not skipped data. HF also omits the duplicate
+final-reports checkpoint: the final checkpoint in cleanup publishes these reports
+before release, and final evidence publication is still retained. LATEST remains a
+separate commit after pinned INDEX read-back; its consistency contract is unchanged.
+
+The notebook's chunk size now defaults to 500 IDs. COUNT=100 still selects exactly
+100 sample IDs in one chunk. On a full crawl, larger chunks reduce prelaunch and
+post-chunk checkpoint frequency; 300-second periodic checkpoints are unchanged.
+A timed-out upload still leaves the previous completed pointer usable. Start a new
+run ID/revision for measurement; changing chunk_size is incompatible with old resume.

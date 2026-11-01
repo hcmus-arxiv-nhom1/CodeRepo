@@ -90,8 +90,28 @@ def commit_retry_delay(exc):
     return max(1, int(match[1])) if match else 3600
 
 
+def commit_batches(files, *, max_files=500, max_bytes=32 * 1024 * 1024):
+    """Bound count and total input bytes without reading raw sources into RAM.
+
+    One file larger than the target is sent alone; files are never split/packed.
+    HTTP commit validation, rather than bandwidth alone, can limit batch size.
+    """
+    if max_files < 1 or max_bytes < 1:
+        raise ValueError("HF commit batch limits must be positive")
+    batch, size = [], 0
+    for name, value in files.items():
+        item_size = value.stat().st_size if isinstance(value, Path) else len(value)
+        if batch and (len(batch) >= max_files or size + item_size > max_bytes):
+            yield batch
+            batch, size = [], 0
+        batch.append((name, value))
+        size += item_size
+    if batch:
+        yield batch
+
+
 class HubStore:
-    def __init__(self, repo_id, cache):
+    def __init__(self, repo_id, cache, *, max_commit_files=500, max_commit_bytes=32 * 1024 * 1024):
         os.environ.setdefault("HF_XET_CACHE", str(Path(cache).parent / ".hf-xet-cache"))
         from huggingface_hub import HfApi
 
@@ -99,6 +119,7 @@ class HubStore:
         if not token:
             raise ValueError("HF_TOKEN missing; enable the Colab Secret")
         self.repo_id, self.cache = repo_id, Path(cache)
+        self.max_commit_files, self.max_commit_bytes = max_commit_files, max_commit_bytes
         self.api = HfApi(token=token)
         self.budget = CommitBudget(self.cache / "commit-budget.json")
         info = self.api.repo_info(repo_id, repo_type="dataset")
@@ -136,9 +157,9 @@ class HubStore:
         from huggingface_hub.errors import HfHubHTTPError
 
         revision = None
-        items = list(files.items())
-        for start in range(0, len(items), 100):
-            batch = items[start : start + 100]
+        for batch in commit_batches(
+            files, max_files=self.max_commit_files, max_bytes=self.max_commit_bytes
+        ):
             for attempt in range(3):
                 self.budget.reserve()
                 head = parent or self.api.repo_info(self.repo_id, repo_type="dataset").sha
@@ -191,16 +212,26 @@ class HFCheckpoints(Checkpoints):
             for name, sha in index["files"].items()
             if committed.get(name) != sha
         }
+        controls = {}
+        control_cache = self.remote / ".hf-control-published.json"
+        prior_controls = json.loads(control_cache.read_text()) if control_cache.exists() else {}
         for folder in ("checkpoint-events", "sessions"):
             for path in (self.remote / folder).glob("*.json"):
-                changes[f"{self.prefix}/{folder}/{path.name}"] = path
+                controls[f"{self.prefix}/{folder}/{path.name}"] = path
         index_bytes = (self.remote / "INDEX.json").read_bytes()
         changes[f"{self.prefix}/INDEX.json"] = index_bytes
         if (self.remote / "MANIFEST.json").is_file():
-            changes[f"{self.prefix}/MANIFEST.json"] = self.remote / "MANIFEST.json"
+            controls[f"{self.prefix}/MANIFEST.json"] = self.remote / "MANIFEST.json"
         for path in (self.local / "book_csv").glob("*"):
             if path.is_file():
-                changes[f"{self.prefix}/book_csv/{path.name}"] = path
+                controls[f"{self.prefix}/book_csv/{path.name}"] = path
+        control_hashes = {}
+        for name, path in controls.items():
+            with path.open("rb") as stream:
+                sha = hashlib.file_digest(stream, "sha256").hexdigest()
+            control_hashes[name] = sha
+            if prior_controls.get(name) != sha:
+                changes[name] = path
         revision = self.store.commit(changes)
         if self.store.read(f"{self.prefix}/INDEX.json", revision) != index_bytes:
             raise OSError("HF checkpoint index read-back failed")
@@ -224,6 +255,10 @@ class HFCheckpoints(Checkpoints):
             {f"{self.prefix}/checkpoint-events/{event_path.name}": event_path},
             "M1 checkpoint timing",
         )
+        control_hashes[f"{self.prefix}/checkpoint-events/{event_path.name}"] = hashlib.sha256(
+            event_path.read_bytes()
+        ).hexdigest()
+        write_json(control_cache, control_hashes)
         return record
 
     def check_owner(self):

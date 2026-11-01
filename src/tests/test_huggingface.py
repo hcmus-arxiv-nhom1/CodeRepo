@@ -158,8 +158,8 @@ def test_hub_sdk_batches_commits_and_uses_pinned_download(tmp_path, monkeypatch)
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
     store = HubStore("team/private", tmp_path / "cache")
-    assert store.commit({f"file-{i}.txt": b"data" for i in range(120)}) == "2"
-    assert calls == [100, 20]
+    assert store.commit({f"file-{i}.txt": b"data" for i in range(1200)}) == "3"
+    assert calls == [500, 500, 200]
     assert store.read("INDEX.json", "2") == b"verified"
     assert downloads and not list((tmp_path / "cache").glob("hf-read-*"))
 
@@ -236,3 +236,48 @@ def test_hub_commit_retries_429_using_server_delay(
     store = h.HubStore("team/private", tmp_path / "cache")
     assert store.commit({"INDEX.json": b"{}"}) == "done"
     assert len(calls) == 2 and clock() == expected_delay
+
+
+def test_commit_batches_respect_byte_limit_with_paths_and_bytes(tmp_path):
+    from src.benchmark.huggingface import commit_batches
+
+    file = tmp_path / "source.tex"
+    file.write_bytes(b"123456")
+    batches = list(
+        commit_batches({"a": b"12345", "b": file, "c": b"12"}, max_files=500, max_bytes=10)
+    )
+    assert [[name for name, _ in batch] for batch in batches] == [["a"], ["b", "c"]]
+    # One oversized source file stays intact and is sent alone.
+    assert list(commit_batches({"large": file, "small": b"1"}, max_bytes=4)) == [
+        [("large", file)],
+        [("small", b"1")],
+    ]
+
+
+def test_checkpoint_does_not_reupload_unchanged_control_files(tmp_path, monkeypatch):
+    from src.benchmark.huggingface import HFCheckpoints
+
+    hub = MemoryHub()
+    local, remote = tmp_path / "local", tmp_path / "mirror"
+    seed_version(local)
+    remote.mkdir()
+    (remote / "MANIFEST.json").write_text('{"run_id":"smoke"}')
+    sessions = remote / "sessions"
+    sessions.mkdir()
+    (sessions / "s1.json").write_text('{"seconds":10}')
+    cp = HFCheckpoints(local, remote, hub, "runs/smoke")
+    cp.save(["2604.20535"])
+    batches = []
+    commit = hub.commit
+
+    def capture(files, *args, **kwargs):
+        batches.append(set(files))
+        return commit(files, *args, **kwargs)
+
+    monkeypatch.setattr(hub, "commit", capture)
+    (local / "work/run.log").write_text("new data")
+    cp.save(["2604.20535"])
+    names = set.union(*batches)
+    assert "runs/smoke/work/run.log" in names
+    assert "runs/smoke/MANIFEST.json" not in names
+    assert "runs/smoke/sessions/s1.json" not in names
