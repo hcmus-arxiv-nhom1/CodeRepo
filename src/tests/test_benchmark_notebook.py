@@ -57,3 +57,50 @@ def test_hf_notebook_defaults_to_private_dataset_smoke_without_embedded_token():
     assert values["MODE"] == "sample" and values["COUNT"] == 100
     assert values["SNAPSHOT_PATH"] == "/content/arxiv-metadata-oai-snapshot.json"
     assert "HF_TOKEN" not in values
+
+
+@pytest.mark.parametrize("state", ["download", "existing", "interrupted"])
+def test_snapshot_cell_publishes_only_finished_download_before_storage(
+    tmp_path, monkeypatch, state
+):
+    import subprocess
+    import sys
+
+    path = Path(__file__).parents[1] / "notebooks/arxiv_nhom1_crawl_benchmark.ipynb"
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    matches = [(i, c) for i, c in enumerate(cells) if c.get("id") == "download-snapshot"]
+    assert len(matches) == 1, "Missing snapshot download cell"
+    index, cell = matches[0]
+    storage = next(i for i, c in enumerate(cells) if "drive.mount(" in "".join(c["source"]))
+    assert index < storage
+    target = tmp_path / "snapshot.json"
+    record = b'{"id":"2604.20535","versions":[{"version":"v1"}]}\n'
+    if state == "existing":
+        target.write_bytes(record)
+
+    def download(handle, *, path, output_dir):
+        assert handle == "Cornell-University/arxiv/versions/123"
+        assert path == "arxiv-metadata-oai-snapshot.json"
+        downloaded = Path(output_dir) / path
+        downloaded.write_bytes(record[:10] if state == "interrupted" else record)
+        if state == "interrupted":
+            raise ConnectionError("interrupted")
+        return str(downloaded)
+
+    def install(*args, **kwargs):
+        if state == "existing":
+            pytest.fail("Existing input should not require install/network")
+
+    monkeypatch.setattr(subprocess, "run", install)
+    monkeypatch.setitem(sys.modules, "kagglehub", SimpleNamespace(dataset_download=download))
+    values = {
+        "SNAPSHOT_PATH": str(target),
+        "KAGGLE_DATASET": "Cornell-University/arxiv/versions/123",
+    }
+    if state == "interrupted":
+        with pytest.raises(ConnectionError):
+            exec("".join(cell["source"]), values)
+        assert not target.exists()
+    else:
+        exec("".join(cell["source"]), values)
+        assert target.read_bytes() == record

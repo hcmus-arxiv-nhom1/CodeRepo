@@ -7,9 +7,12 @@ Open `src/notebooks/arxiv_nhom1_crawl_benchmark.ipynb` from the published
 1. Add the existing writable Dataset token as **HF_TOKEN** in Colab Secrets and enable
    notebook access. Keep `PancakeDang/arxiv-nhom1-introds` private. No login/token files
    are written by the notebook; the token is passed through the process environment.
-2. Copy the unchanged Kaggle snapshot to `/content/arxiv-metadata-oai-snapshot.json`.
-   A separate Drive mount may be used only to copy this input. HF output mode itself
-   does not mount or depend on Drive.
+2. Run **Download the Kaggle snapshot**, before storage authorization. It downloads the
+   JSONL directly to `/content/arxiv-metadata-oai-snapshot.json` and reuses an existing
+   input. If authentication is required, add KAGGLE_API_TOKEN to Colab Secrets. Pin
+   KAGGLE_DATASET to the same `/versions/<number>` for later resume, or copy the exact
+   original snapshot first. Changed snapshot bytes are rejected on resume. No Drive
+   mount or browser upload is required. Download/install is outside benchmark time.
 3. Keep STORAGE_BACKEND="huggingface", HF_REPO_ID="PancakeDang/arxiv-nhom1-introds",
    MODE="sample", RANGES=("dang",), COUNT=100, CHUNK_SIZE=100, RESUME=False and TAKEOVER=False.
    Use a new RUN_ID for a new experiment. The notebook is pinned to the implementation
