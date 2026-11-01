@@ -55,52 +55,54 @@ def test_hf_notebook_defaults_to_private_dataset_smoke_without_embedded_token():
     assert values["STORAGE_BACKEND"] == "huggingface"
     assert values["HF_REPO_ID"] == "PancakeDang/arxiv-nhom1-introds"
     assert values["MODE"] == "sample" and values["COUNT"] == 100
-    assert values["SNAPSHOT_PATH"] == "/content/arxiv-metadata-oai-snapshot.json"
+    assert values["SNAPSHOT_PATH"] == "/content/arxiv-assigned-20000.jsonl"
     assert "HF_TOKEN" not in values
 
 
-@pytest.mark.parametrize("state", ["download", "existing", "interrupted"])
-def test_snapshot_cell_publishes_only_finished_download_before_storage(
-    tmp_path, monkeypatch, state
-):
-    import subprocess
+@pytest.mark.parametrize("state", ["copy", "existing", "interrupted", "corrupt"])
+def test_snapshot_cell_verifies_drive_input_before_storage(tmp_path, monkeypatch, state):
+    import hashlib
+    import shutil
     import sys
 
     path = Path(__file__).parents[1] / "notebooks/arxiv_nhom1_crawl_benchmark.ipynb"
     cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
-    matches = [(i, c) for i, c in enumerate(cells) if c.get("id") == "download-snapshot"]
-    assert len(matches) == 1, "Missing snapshot download cell"
-    index, cell = matches[0]
-    storage = next(i for i, c in enumerate(cells) if "drive.mount(" in "".join(c["source"]))
+    index, cell = next((i, c) for i, c in enumerate(cells) if c.get("id") == "download-snapshot")
+    storage = next(
+        i for i, c in enumerate(cells) if 'userdata.get("HF_TOKEN")' in "".join(c["source"])
+    )
     assert index < storage
-    target = tmp_path / "snapshot.json"
+    target, source = tmp_path / "snapshot.jsonl", tmp_path / "drive" / "input.jsonl"
+    source.parent.mkdir()
     record = b'{"id":"2604.20535","versions":[{"version":"v1"}]}\n'
+    source.write_bytes(record if state != "corrupt" else b"wrong input")
     if state == "existing":
         target.write_bytes(record)
 
-    def download(handle, *, path, output_dir):
-        assert handle == "Cornell-University/arxiv/versions/123"
-        assert path == "arxiv-metadata-oai-snapshot.json"
-        downloaded = Path(output_dir) / path
-        downloaded.write_bytes(record[:10] if state == "interrupted" else record)
-        if state == "interrupted":
-            raise ConnectionError("interrupted")
-        return str(downloaded)
-
-    def install(*args, **kwargs):
+    def mount(*args, **kwargs):
         if state == "existing":
-            pytest.fail("Existing input should not require install/network")
+            pytest.fail("Verified existing local input should not mount Drive")
 
-    monkeypatch.setattr(subprocess, "run", install)
-    monkeypatch.setitem(sys.modules, "kagglehub", SimpleNamespace(dataset_download=download))
+    monkeypatch.setitem(
+        sys.modules, "google.colab", SimpleNamespace(drive=SimpleNamespace(mount=mount))
+    )
+    if state == "interrupted":
+
+        def interrupted(src, dst):
+            Path(dst).write_bytes(record[:10])
+            raise OSError("interrupted")
+
+        monkeypatch.setattr(shutil, "copyfile", interrupted)
     values = {
         "SNAPSHOT_PATH": str(target),
-        "KAGGLE_DATASET": "Cornell-University/arxiv/versions/123",
+        "SNAPSHOT_DRIVE_PATH": str(source),
+        "SNAPSHOT_SHA256": hashlib.sha256(record).hexdigest(),
     }
-    if state == "interrupted":
-        with pytest.raises(ConnectionError):
+    if state in ("interrupted", "corrupt"):
+        with pytest.raises((OSError, ValueError)):
             exec("".join(cell["source"]), values)
         assert not target.exists()
     else:
         exec("".join(cell["source"]), values)
         assert target.read_bytes() == record
+    assert source.exists(), "Never delete the Drive input"
