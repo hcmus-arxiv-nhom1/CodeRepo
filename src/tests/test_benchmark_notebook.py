@@ -18,7 +18,8 @@ def test_single_notebook_has_safe_smoke_defaults_and_no_outputs():
     assert 'MODE = "sample"' in source
     assert "COUNT = 100" in source
     assert "RESUME = False" in source
-    assert "SESSION_BUDGET_S = 4 * 60 * 60" in source
+    assert "SHIFT_OWNER" not in source
+    assert "TAKEOVER" not in source
     assert "run_benchmark(" in source and "prepare_drive(" in source
     assert "rm -rf" not in source
     assert "shutil.rmtree" not in source

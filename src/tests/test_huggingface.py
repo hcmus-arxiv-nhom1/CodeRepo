@@ -164,23 +164,6 @@ def test_hub_sdk_batches_commits_and_uses_pinned_download(tmp_path, monkeypatch)
     assert downloads and not list((tmp_path / "cache").glob("hf-read-*"))
 
 
-def test_hf_shift_refuses_active_owner_and_detects_takeover(tmp_path):
-    from src.benchmark.runner import Shift
-
-    hub = MemoryHub()
-    shift = Shift(tmp_path, "dang", hub=hub)
-    shift.thread.start()
-    try:
-        with pytest.raises(RuntimeError, match="Another shift"):
-            Shift(tmp_path, "hieu", hub=hub)
-        hub.commit({"SHIFT.json": json.dumps(dict(token="other", released=False)).encode()})
-        shift.last_remote_check = -float("inf")
-        with pytest.raises(RuntimeError, match="ownership changed"):
-            shift.check()
-    finally:
-        shift.close(release=False)
-
-
 def test_commit_budget_survives_new_store_and_waits_for_window(tmp_path, monkeypatch):
     from src.benchmark import huggingface as h
     from src.tests.helpers import FakeClock
@@ -297,3 +280,47 @@ def test_hf_revision_history_avoids_local_drive_backup_objects(tmp_path):
     restored = tmp_path / "restored"
     HFCheckpoints(restored, tmp_path / "mirror2", hub, "runs/smoke").restore()
     assert (restored / "data/corpus/2604-20535/v1/main.tex").read_text() == "complete source"
+
+
+def test_hf_run_claim_is_unique_without_shift_marker():
+    from src.benchmark.runner import claim_hf_run
+
+    hub = MemoryHub()
+    claim_hf_run(hub, "run-a", {"config": {"run_id": "run-a"}})
+    claim_hf_run(hub, "run-b", {"config": {"run_id": "run-b"}})
+    with pytest.raises(FileExistsError):
+        claim_hf_run(hub, "run-a", {"config": {"run_id": "run-a"}})
+    assert "SHIFT.json" not in hub.files()
+    assert "runs/run-a/MANIFEST.json" in hub.files()
+    assert "runs/run-b/MANIFEST.json" in hub.files()
+
+@pytest.mark.parametrize("same_id", [False, True])
+def test_hf_claim_handles_concurrent_repo_commit(monkeypatch, same_id):
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+
+    from src.benchmark.runner import claim_hf_run
+
+    hub = MemoryHub()
+    commit = hub.commit
+    calls = 0
+
+    def race(files, message="M1 checkpoint", parent=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            name = "run-a" if same_id else "other-run"
+            commit({f"runs/{name}/MANIFEST.json": b"{}"})
+            response = httpx.Response(409, request=httpx.Request("POST", "https://example.test"))
+            raise HfHubHTTPError("conflict", response=response)
+        return commit(files, message, parent=parent)
+
+    monkeypatch.setattr(hub, "commit", race)
+    if same_id:
+        with pytest.raises(FileExistsError):
+            claim_hf_run(hub, "run-a", {"config": {"run_id": "run-a"}})
+        assert hub.read("runs/run-a/MANIFEST.json") == b"{}"
+    else:
+        claim_hf_run(hub, "run-a", {"config": {"run_id": "run-a"}})
+        assert hub.read("runs/other-run/MANIFEST.json") == b"{}"
+        assert hub.read("runs/run-a/MANIFEST.json") is not None

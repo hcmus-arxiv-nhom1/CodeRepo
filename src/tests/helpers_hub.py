@@ -9,9 +9,14 @@ class MemoryHub:
         self.head = "0"
         self.fail = False
 
+    def get_head(self):
+        return self.head
+
     def commit(self, files, message="checkpoint", parent=None):
         if self.fail:
             raise OSError("upload interrupted")
+        if parent is not None and parent != self.head:
+            raise ValueError("parent commit mismatch")
         tree = dict(self.revisions[self.head])
         tree.update({k: (v.read_bytes() if isinstance(v, Path) else v) for k, v in files.items()})
         self.head = str(len(self.revisions))

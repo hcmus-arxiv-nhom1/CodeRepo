@@ -1,6 +1,6 @@
 """One resumable full-crawl benchmark, used by the Colab entry notebook.
 
-The parent owns the shift and profiles each child. Children checkpoint only at
+The parent profiles each child. Children checkpoint only at
 completed-version boundaries, within the profiler's measured process tree.
 """
 
@@ -16,7 +16,6 @@ import platform
 import re
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -59,7 +58,7 @@ def plan_chunks(cfg: BenchmarkConfig) -> list[Chunk]:
         raise ValueError("HF Dataset repo ID is required")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", cfg.run_id):
         raise ValueError("Run ID must be a simple unique name")
-    if cfg.mode not in ("sample", "final") or cfg.chunk_size < 1 or cfg.offset < 0:
+    if cfg.mode not in ("sample", "partition", "final") or cfg.chunk_size < 1 or cfg.offset < 0:
         raise ValueError("Invalid benchmark selection")
     if cfg.checkpoint_s <= 0 or (cfg.count is not None and cfg.count < 1):
         raise ValueError("Count and checkpoint interval must be positive")
@@ -113,81 +112,24 @@ def prepare_run(cfg: BenchmarkConfig, root: Path, revision: str, *, resume: bool
     return manifest
 
 
-class Shift:
-    """Advisory Drive lease; group coordination is still required (Drive is not a DB)."""
+def claim_hf_run(hub, run_id: str, manifest: dict) -> None:
+    """Atomically reserve a new run name, without a global shift marker."""
+    from huggingface_hub.errors import HfHubHTTPError
 
-    def __init__(self, drive: Path, owner: str, *, takeover: bool = False, hub=None):
-        self.hub = hub
-        self.claimed = False
-        self.last_remote_check = -float("inf")
-        self.path = drive / "SHIFT.json"
-        if hub is not None:
-            old_marker = hub.read("SHIFT.json", missing_ok=True)
-            if old_marker is not None:
-                write_json(self.path, json.loads(old_marker))
-        self.owner, self.token = owner, uuid.uuid4().hex
-        self.stop = threading.Event()
-        self.error: Exception | None = None
-        if self.path.exists():
-            try:
-                old = json.loads(self.path.read_text(encoding="utf-8"))
-            except ValueError as exc:
-                raise ValueError("Unreadable shift marker: inspect it before takeover") from exc
-            if not old.get("released") and not takeover:
-                raise RuntimeError(
-                    "Another shift may still run; confirm it stopped before takeover"
-                )
-        self._beat()
-        self.thread = threading.Thread(target=self._loop, daemon=True)
-
-    def _beat(self, *, released: bool = False) -> None:
-        write_json(
-            self.path, dict(owner=self.owner, token=self.token, at=time.time(), released=released)
-        )
-        if self.hub is not None and (not self.claimed or released):
-            self.hub.commit({"SHIFT.json": self.path.read_bytes()}, "M1 shift handoff")
-            self.claimed = True
-
-    def _loop(self) -> None:
-        while not self.stop.wait(30):
-            try:
-                self.check()
-                self._beat()
-            except Exception as exc:
-                self.error = exc
-                return
-
-    def check(self) -> None:
-        if self.error:
-            raise RuntimeError("Shift heartbeat failed; stop crawling") from self.error
-        if self.hub is not None and time.monotonic() - self.last_remote_check >= 30:
-            marker = json.loads(self.hub.read("SHIFT.json"))
-            if marker.get("token") != self.token:
-                raise RuntimeError("HF shift ownership changed; stop crawling")
-            self.last_remote_check = time.monotonic()
-        for attempt in range(3):
-            try:
-                marker = json.loads(self.path.read_text(encoding="utf-8"))
-                if not isinstance(marker, dict):
-                    raise ValueError("Shift marker is not an object")
-            except (OSError, ValueError) as exc:
-                if attempt == 2:
-                    raise RuntimeError(
-                        "Shift marker missing/unreadable; stop and keep local data"
-                    ) from exc
-                time.sleep(0.2)
-                continue
-            if marker.get("token") != self.token:
-                raise RuntimeError("Shift ownership changed; stop crawling")
+    path = f"runs/{run_id}/MANIFEST.json"
+    for attempt in range(5):
+        head = hub.get_head()
+        if not head:
+            raise ValueError("Initialize the HF Dataset repository before creating a run")
+        if hub.read(path, revision=head, missing_ok=True) is not None:
+            raise FileExistsError(f"HF run ID already exists: {run_id}")
+        try:
+            hub.commit({path: json.dumps(manifest).encode("utf-8")}, "M1 reserve run", parent=head)
             return
-
-    def close(self, *, release: bool) -> None:
-        self.stop.set()
-        self.thread.join()
-        if release:
-            self.last_remote_check = -float("inf")
-            self.check()
-            self._beat(released=True)
+        except HfHubHTTPError as exc:
+            if exc.response is None or exc.response.status_code != 409 or attempt == 4:
+                raise
+    raise RuntimeError("Could not reserve HF run")
 
 
 def coverage(cfg: BenchmarkConfig, local: Path) -> dict:
@@ -236,12 +178,11 @@ def _chunk_complete(chunk: Chunk, local: Path, references: bool) -> bool:
     return not any(i.severity == "error" for i in issues)
 
 
-def checkpoint_backend(local, remote, *, repo_id=None, hub=None, owner_token=None):
+def checkpoint_backend(local, remote, *, repo_id=None, hub=None):
     if repo_id:
         from src.benchmark.huggingface import HFCheckpoints, HubStore
 
         hub = hub or HubStore(repo_id, remote.parent.parent / ".hf-cache")
-        hub.owner_token = owner_token
         return HFCheckpoints(local, remote, hub, f"runs/{remote.name}")
     return Checkpoints(local, remote)
 
@@ -250,9 +191,7 @@ def run_child(payload: dict) -> None:
     from src.run_pipeline import run
 
     local, remote = Path(payload["local"]), Path(payload["remote"])
-    cp = checkpoint_backend(
-        local, remote, repo_id=payload.get("hf_repo_id"), owner_token=payload.get("hf_shift_token")
-    )
+    cp = checkpoint_backend(local, remote, repo_id=payload.get("hf_repo_id"))
     last = time.monotonic()
 
     def checkpoint(_record):
@@ -365,10 +304,7 @@ def run_benchmark(
     local_root: Path,
     revision: str,
     team_id: str,
-    owner: str,
     resume: bool = False,
-    takeover: bool = False,
-    session_budget_s: float = 14400,
 ) -> dict:
     """Run in the notebook's foreground; all real crawl work lives in profiled children."""
     import psutil
@@ -385,10 +321,8 @@ def run_benchmark(
         prepare_drive(drive_root, team_id, initialize=True)
     else:
         prepare_drive(drive_root, team_id)
-    shift = Shift(drive_root, owner, takeover=takeover, hub=hub)
-    shift.thread.start()
     local, remote = local_root / cfg.run_id, drive_root / "runs" / cfg.run_id
-    safe_to_release = False
+    checkpoint_published = False
     child = None
     measurements = None
     run_ready = False
@@ -396,6 +330,8 @@ def run_benchmark(
     session_start = time.perf_counter()
     try:
         manifest = prepare_run(cfg, drive_root / "runs", revision, resume=resume)
+        if hub is not None and not resume:
+            claim_hf_run(hub, cfg.run_id, manifest)
         from src.benchmark.measurements import SessionMeasurements
 
         session_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
@@ -432,9 +368,7 @@ def run_benchmark(
             ),
         )
         measurements.start()
-        cp = checkpoint_backend(
-            local, remote, repo_id=cfg.hf_repo_id if hub else None, hub=hub, owner_token=shift.token
-        )
+        cp = checkpoint_backend(local, remote, repo_id=cfg.hf_repo_id if hub else None, hub=hub)
         if resume:
             cp.restore()  # fresh local destination required; never delete existing data
         elif local.exists():
@@ -475,13 +409,7 @@ def run_benchmark(
         cp.save([], phase="initial")
         last_exit = None
         for chunk in chunks:
-            shift.check()
             measurements.check()
-            if time.perf_counter() - session_start >= session_budget_s:
-                print(
-                    "Session budget reached: checkpoint and resume in a fresh runtime.", flush=True
-                )
-                break
             if _chunk_complete(chunk, local, cfg.references):
                 print(f"Verified complete: {chunk.owner} {chunk.offset}", flush=True)
                 continue
@@ -499,7 +427,6 @@ def run_benchmark(
                 references=cfg.references,
                 snapshot=str(snapshot_index) if snapshot_index else None,
                 hf_repo_id=cfg.hf_repo_id if hub else None,
-                hf_shift_token=shift.token if hub else None,
             )
             payload_path = work / "chunk.json"
             write_json(payload_path, payload)
@@ -520,7 +447,6 @@ def run_benchmark(
                 remote,
                 repo_id=cfg.hf_repo_id if hub else None,
                 hub=hub,
-                owner_token=shift.token,
             ).save(list(chunk.ids), phase="prelaunch")
             cmd = [
                 sys.executable,
@@ -554,7 +480,6 @@ def run_benchmark(
                 )
             try:
                 while child.poll() is None:
-                    shift.check()
                     measurements.check()
                     time.sleep(1)
             except BaseException:
@@ -587,7 +512,6 @@ def run_benchmark(
                 remote,
                 repo_id=cfg.hf_repo_id if hub else None,
                 hub=hub,
-                owner_token=shift.token,
             )
             sync_start = time.perf_counter()
             measurements.phase = "post-chunk-sync"
@@ -622,10 +546,10 @@ def run_benchmark(
         result["final_complete"] = result["final_complete"] and result["timing_complete"]
         write_json(work / "coverage.json", result)
         export_evidence(cfg, local)
-        # HF's finally checkpoint persists these same reports before releasing the shift.
+        # HF's finally checkpoint persists these same reports.
         if hub is None:
             cp.save(all_ids, phase="final-reports")
-        safe_to_release = True
+        checkpoint_published = True
         return result
     finally:
         primary_error = sys.exception()
@@ -644,31 +568,25 @@ def run_benchmark(
             try:
                 if measurements is not None:
                     measurements.phase = "final-sync"
-                shift.check()  # never publish into a run after losing ownership/Drive visibility
                 checkpoint_backend(
                     local,
                     remote,
                     repo_id=cfg.hf_repo_id if hub else None,
                     hub=hub,
-                    owner_token=shift.token,
                 ).save([i for c in plan_chunks(cfg) for i in c.ids], phase="final")
-                safe_to_release = True
+                checkpoint_published = True
             except Exception as exc:
                 cleanup_errors.append(
                     dict(phase="final-checkpoint", error=f"{type(exc).__name__}: {exc}")
                 )
-                logging.exception("Final checkpoint failed; shift kept active")
-                safe_to_release = False
-        before = len(cleanup_errors)
-        cleanup("shift-release", lambda: shift.close(release=safe_to_release or not run_ready))
-        if len(cleanup_errors) != before:
-            safe_to_release = False
+                logging.exception("Final checkpoint failed; preserve local data")
+                checkpoint_published = False
         if measurements is not None:
             from src.benchmark.measurements import collect_measurements
 
             measurement_summary = cleanup(
                 "local-measurement-finalization",
-                lambda: measurements.finish(publish_remote=safe_to_release),
+                lambda: measurements.finish(publish_remote=checkpoint_published),
             )
             if measurement_summary and not measurement_summary["complete"]:
                 cleanup_errors.append(
@@ -677,21 +595,21 @@ def run_benchmark(
                         error=measurement_summary.get("telemetry_error", "Incomplete measurement"),
                     )
                 )
-            if safe_to_release and measurement_summary and measurement_summary["complete"]:
+            if checkpoint_published and measurement_summary and measurement_summary["complete"]:
                 cleanup(
                     "remote-measurement-collection", lambda: collect_measurements(local, remote)
                 )
         if run_ready:
             session = dict(
                 seconds_through_final_sync=time.perf_counter() - session_start,
-                shift_released=safe_to_release,
+                checkpoint_published=checkpoint_published,
                 ended_at=datetime.now(UTC).isoformat(),
             )
             cleanup(
                 "local-session-summary",
                 lambda: write_json(local / f"work/session_totals/{session_id}.json", session),
             )
-            if safe_to_release:
+            if checkpoint_published:
                 cleanup(
                     "remote-session-summary",
                     lambda: write_json(remote / f"sessions/{session_id}.json", session),
@@ -720,12 +638,15 @@ def run_benchmark(
             )
             # Include the last checkpoint event and session total in the downloadable ZIP.
             evidence = cleanup("local-evidence-export", lambda: export_evidence(cfg, local))
-            if evidence is not None and hub is not None and safe_to_release and not cleanup_errors:
+            if (
+                evidence is not None
+                and hub is not None
+                and checkpoint_published
+                and not cleanup_errors
+            ):
                 cleanup(
                     "HF-final-evidence-publication",
-                    lambda: checkpoint_backend(
-                        local, remote, repo_id=cfg.hf_repo_id, hub=hub, owner_token=shift.token
-                    ).save(
+                    lambda: checkpoint_backend(local, remote, repo_id=cfg.hf_repo_id, hub=hub).save(
                         [i for c in plan_chunks(cfg) for i in c.ids], phase="evidence-publication"
                     ),
                 )

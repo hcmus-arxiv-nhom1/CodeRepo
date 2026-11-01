@@ -78,7 +78,6 @@ def test_rejected_revision_never_finalizes_or_changes_saved_run(tmp_path):
             local_root=tmp_path / "local",
             revision="new",
             team_id="team",
-            owner="dang",
             resume=True,
         )
     index = json.loads((remote / "INDEX.json").read_text())
@@ -204,19 +203,6 @@ def test_timing_audit_with_no_started_chunk_is_incomplete(tmp_path):
     assert not timing_audit(tmp_path)["timing_complete"]
 
 
-def test_same_owner_second_session_still_requires_explicit_takeover(tmp_path):
-    from src.benchmark.runner import Shift
-
-    first = Shift(tmp_path, "dang")
-    with pytest.raises(RuntimeError):
-        Shift(tmp_path, "dang")
-    first.thread.start()
-    first.close(release=True)
-    second = Shift(tmp_path, "tien")
-    second.thread.start()
-    second.close(release=True)
-
-
 @pytest.mark.parametrize("storage_backend", ["drive", "huggingface"])
 @pytest.mark.parametrize("readback_failure", [False, True])
 @pytest.mark.parametrize("snapshot_enabled", [False, True])
@@ -314,7 +300,6 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(
                 local_root=tmp_path / "local",
                 revision="abc",
                 team_id="team",
-                owner="dang",
             )
         measured, _ = session_report(tmp_path / "local/smoke")
         assert not measured["complete"]
@@ -325,7 +310,6 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(
         local_root=tmp_path / "local",
         revision="abc",
         team_id="team",
-        owner="dang",
     )
     if storage_backend == "huggingface":
         events = [
@@ -347,10 +331,10 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(
     restored = tmp_path / "restored"
     Checkpoints(restored, drive / "runs/smoke").restore()
     assert (restored / "work/coverage.json").is_file()
-    assert json.loads((drive / "SHIFT.json").read_text())["released"]
+    assert not (drive / "SHIFT.json").exists()
 
 
-def test_missing_shift_does_not_mask_original_error_or_prevent_local_evidence(
+def test_prelaunch_error_does_not_mask_original_error_or_prevent_local_evidence(
     tmp_path, monkeypatch
 ):
     from src.benchmark import runner
@@ -362,7 +346,6 @@ def test_missing_shift_does_not_mask_original_error_or_prevent_local_evidence(
 
     def failed(cp, ids, **kwargs):
         if kwargs.get("phase") == "prelaunch":
-            (drive / "SHIFT.json").unlink()
             raise ValueError("original chunk failure")
         return original(cp, ids, **kwargs)
 
@@ -375,33 +358,12 @@ def test_missing_shift_does_not_mask_original_error_or_prevent_local_evidence(
             local_root=tmp_path / "local",
             revision="abc",
             team_id="team",
-            owner="dang",
         )
     local = tmp_path / "local/failed"
     assert (local / "bench_results.zip").is_file()
     errors = json.loads((local / "work/cleanup_errors.json").read_text())
-    assert errors["errors"]
+    assert "original chunk failure" in errors["primary_error"]
     assert list((local / "work/measurements").glob("*/summary.json"))
-
-
-def test_shift_read_retries_transient_disappearance_without_recreating_marker(
-    tmp_path, monkeypatch
-):
-    from src.benchmark.runner import Shift
-
-    shift = Shift(tmp_path, "dang")
-    original = Path.read_text
-    failures = [True]
-
-    def transient(path, *args, **kwargs):
-        if path == shift.path and failures:
-            failures.pop()
-            raise FileNotFoundError("temporary missing marker")
-        return original(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", transient)
-    shift.check()
-    assert json.loads(original(shift.path))["token"] == shift.token
 
 
 def test_export_failure_keeps_primary_error_and_creates_raw_rescue(tmp_path, monkeypatch):
@@ -432,7 +394,6 @@ def test_export_failure_keeps_primary_error_and_creates_raw_rescue(tmp_path, mon
             local_root=tmp_path / "local",
             revision="abc",
             team_id="team",
-            owner="dang",
         )
     with ZipFile(tmp_path / "local/failed/rescue_results.zip") as archive:
         assert "work/cleanup_errors.json" in archive.namelist()
@@ -528,3 +489,30 @@ def test_drive_save_repairs_plain_mirror_when_restore_used_a_backup(tmp_path, mo
     next_cp.restore()
     next_cp.save(["2604.20535"])
     assert (remote / file.relative_to(local)).read_bytes() == original
+
+
+def test_partition_mode_accepts_one_assigned_range_without_claiming_full_final():
+    cfg = BenchmarkConfig("part-dang", "partition", ("dang",), count=10, references=True)
+    chunks = plan_chunks(cfg)
+    assert sum(len(c.ids) for c in chunks) == 10
+    assert chunks[0].ids[0] == "2604.20535"
+
+
+def test_run_without_shift_ignores_and_preserves_old_marker(tmp_path, monkeypatch):
+    from src.benchmark import runner
+
+    root = tmp_path / "drive"
+    root.mkdir()
+    prepare_drive(root, "team", initialize=True)
+    (root / "SHIFT.json").write_text("legacy unreadable marker")
+
+    def stop_at_prepare(*args, **kwargs):
+        raise RuntimeError("reached prepare")
+
+    monkeypatch.setattr(runner, "prepare_run", stop_at_prepare)
+    cfg = BenchmarkConfig("part-a", "sample", ("dang",), count=1, references=False)
+    with pytest.raises(RuntimeError, match="reached prepare"):
+        runner.run_benchmark(
+            cfg, drive_root=root, local_root=tmp_path / "local", revision="abc", team_id="team"
+        )
+    assert (root / "SHIFT.json").read_text() == "legacy unreadable marker"

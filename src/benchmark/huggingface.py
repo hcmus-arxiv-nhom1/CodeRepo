@@ -126,6 +126,9 @@ class HubStore:
         if not info.private:
             raise ValueError("Expected a private Hugging Face Dataset")
 
+    def get_head(self):
+        return self.api.repo_info(self.repo_id, repo_type="dataset").sha
+
     def read(self, path, revision="main", missing_ok=False):
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import EntryNotFoundError
@@ -206,7 +209,6 @@ class HFCheckpoints(Checkpoints):
 
     def save(self, ids, **kwargs):
         started = time.perf_counter()
-        self.check_owner()
         record = super().save(ids, **kwargs)
         index = json.loads((self.remote / "INDEX.json").read_text(encoding="utf-8"))
         previous = self.remote / ".hf-published.json"
@@ -242,7 +244,6 @@ class HFCheckpoints(Checkpoints):
         point = dict(
             schema=1, revision=revision, index_sha256=hashlib.sha256(index_bytes).hexdigest()
         )
-        self.check_owner()
         self.store.commit(
             {f"{self.prefix}/LATEST.json": json.dumps(point).encode()}, "M1 checkpoint complete"
         )
@@ -264,11 +265,6 @@ class HFCheckpoints(Checkpoints):
         ).hexdigest()
         write_json(control_cache, control_hashes)
         return record
-
-    def check_owner(self):
-        token = getattr(self.store, "owner_token", None)
-        if token and json.loads(self.store.read("SHIFT.json")).get("token") != token:
-            raise RuntimeError("HF shift ownership changed; checkpoint not published")
 
     def restore(self):
         point = json.loads(self.store.read(f"{self.prefix}/LATEST.json"))

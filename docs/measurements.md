@@ -23,7 +23,7 @@ remain resumable only with their original revision; do not combine their measure
 | Corpus/reference statistics | `corpus_summary.csv`: completion and TeX counts, mean uncompressed bytes before/after extension filtering, mean references, reference-list success per required ID, resolved S2-ID rate and metadata completeness (S2 ID + title + authors + date/year) per citation. Unresolved/empty references remain in the denominator. |
 
 The sampling boundary starts after run identity/preflight validation and before
-corpus restore, and ends after final corpus sync and shift release. Environment
+corpus restore, and ends after final corpus sync. Environment
 installation, Drive authorization, final telemetry publication/collection, final
 evidence re-export/download and offline gaps are outside this boundary. Earlier
 report generation inside the runner is included. Monitoring has real overhead,
@@ -90,10 +90,8 @@ marked as legacy in the measurement audit.
 
 ## Before optimizing
 
-If the Drive shift marker disappears, the runner retries the read briefly and then
-stops without recreating/claiming the marker. Losing ownership or Drive visibility
-prevents final remote checkpoint publication. Cleanup errors are recorded separately
-in `work/cleanup_errors.json`, with the original exception preserved.
+Each run retains its own checkpoint and evidence under its run ID. An unsuccessful
+checkpoint prevents the runner from claiming successful remote publication.
 
 Local measurement finalization and evidence export are still attempted. Buffered
 telemetry is copied from local staging into `work/measurements`; failed remote
@@ -107,7 +105,7 @@ does not imply that its files were uploaded to Drive. Diagnose the original erro
 and QA before deciding whether/how to resume; do not restart a large sample blindly.
 
 Run a new 200-ID sample with the same IDs, all versions and references. Also test a
-graceful session-budget handoff/resume and an intentional runtime loss on a separate
+checkpoint/resume and an intentional runtime loss on a separate
 small sample; verify restore and incomplete-timing reporting. Retain the original
 200-ID baseline untouched. The fake-response test suite does not replace a live
 Colab/Drive smoke test.

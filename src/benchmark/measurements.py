@@ -190,7 +190,7 @@ class SessionMeasurements:
             self.thread.join()
         failure = self.error
         if not publish_remote and failure is None:
-            failure = OSError("Remote finalization disabled after shift/checkpoint failure")
+            failure = OSError("Remote finalization disabled after checkpoint failure")
         self.publish_remote = publish_remote and failure is None
         try:
             self.sample(final=True)

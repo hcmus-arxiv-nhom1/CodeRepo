@@ -19,7 +19,7 @@ Open `src/notebooks/arxiv_nhom1_crawl_benchmark.ipynb` from the published
    MODE="sample", RANGES=("dang",), COUNT=100, CHUNK_SIZE=500, RESUME=False and TAKEOVER=False.
    Use a new RUN_ID for a new experiment. The notebook is pinned to the implementation
    commit and the repository is the published DankDaPancake fork.
-4. Run setup: it checks private-Dataset read access. The first shift-claim commit checks
+4. Run setup: it checks private-Dataset read access. The first run-reservation commit checks
    write access before crawling. Neither stage prints the token. Read-only token,
    missing token, missing repo, and public repo fail before crawl work starts.
 5. Run preflight and benchmark. Expect `Snapshot: 100/100 IDs indexed`; source requests
@@ -28,7 +28,7 @@ Open `src/notebooks/arxiv_nhom1_crawl_benchmark.ipynb` from the published
    also publish checkpoints. HF calls may run concurrently; arXiv calls remain serialized.
 6. Run the final report/download cells and retain bench_results.zip. Check that the HF
    run contains LATEST.json, INDEX.json, MANIFEST.json, data/, work/, measurements/, and
-   book_csv/ before handing over the shift in group chat.
+   book_csv/ before handing over the run in group chat.
 
 ## Remote layout and M2
 
@@ -36,7 +36,6 @@ Files remain raw, not corpus ZIPs:
 
 ```text
 PancakeDang/arxiv-nhom1-introds/
-  SHIFT.json
   runs/<RUN_ID>/
     MANIFEST.json
     LATEST.json
@@ -66,10 +65,7 @@ corpus/journal files at the pointer revision and verifies hashes, then overlays 
 independent session telemetry. Failed sync keeps local evidence and does not certify a
 clean full run. Read caches are temporary so repeated INDEX revisions do not fill disk.
 
-SHIFT.json is advisory: coordinate exactly one crawler in group chat. The marker is
-claimed once, checked during the run and before checkpoint publication, and released
-at cleanup; it is not an atomic distributed lock. Wait for the foreground benchmark and
-final report publication to finish before another operator starts.
+SHIFT.json is no longer used. Use a distinct run ID per independent run and never resume a run concurrently. Different runtimes do not share an arXiv limiter or Hugging Face commit budget; concurrent crawling is not yet coordinated.
 
 ## Resume after runtime loss
 
@@ -90,7 +86,7 @@ completion-pointer publication; the independent timing-record upload follows the
 boundary. Do not add checkpoint durations again to session wall.
 
 Offline tests cover versioned roundtrip, upload interruption before and during commits,
-corrupt source refusal, empty versions, telemetry restore, shift handoff and SDK argument
+corrupt source refusal, empty versions, telemetry restore, resume and SDK argument
 compatibility. A live private-HF smoke with the user's Colab Secret is still required.
 No live Dataset writes were performed while implementing this backend.
 
