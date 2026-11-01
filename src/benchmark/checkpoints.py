@@ -68,6 +68,7 @@ class Checkpoints:
         self.generation = None
         self.hashes: dict[str, str] = {}
         self.directories: set[str] = set()
+        self.repairs: set[str] = set()
         self._loaded = False
 
     @staticmethod
@@ -94,6 +95,7 @@ class Checkpoints:
             self.generation = head["generation"]
             self.hashes = dict(head["files"])
             self.directories = set(head["directories"])
+            self.repairs = set(head.get("repairs", []))
         self._loaded = True
 
     def save(
@@ -168,7 +170,7 @@ class Checkpoints:
                 except ValueError:
                     continue  # torn metadata/references write; retry at the next checkpoint
             sha = digest(path)
-            if self.hashes.get(name) == sha:
+            if self.hashes.get(name) == sha and name not in self.repairs:
                 files[name] = sha
                 continue
             destination = self.remote / name
@@ -185,6 +187,7 @@ class Checkpoints:
             finally:
                 tmp.unlink(missing_ok=True)
             files[name] = sha
+            self.repairs.discard(name)
             copied_bytes += path.stat().st_size
         generation = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + "-" + uuid.uuid4().hex[:8]
         rec = dict(
@@ -202,7 +205,12 @@ class Checkpoints:
         self.generation, self.hashes, self.directories = generation, files, set(rec["directories"])
         write_json(
             self.local / ".checkpoint-head.json",
-            dict(generation=generation, files=files, directories=rec["directories"]),
+            dict(
+                generation=generation,
+                files=files,
+                directories=rec["directories"],
+                repairs=sorted(self.repairs),
+            ),
         )
         return rec
 
@@ -247,6 +255,7 @@ class Checkpoints:
                 source = self.remote / ".checkpoint-objects" / expected[:2] / expected
                 if not source.is_file() or not self._verify(source, expected):
                     raise ValueError(f"Restored file mismatch: {name}")
+                self.repairs.add(name)
             destination = self.local / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
@@ -257,7 +266,12 @@ class Checkpoints:
         )
         write_json(
             self.local / ".checkpoint-head.json",
-            dict(generation=self.generation, files=self.hashes, directories=index["directories"]),
+            dict(
+                generation=self.generation,
+                files=self.hashes,
+                directories=index["directories"],
+                repairs=sorted(self.repairs),
+            ),
         )
         self._loaded = True
         # The latest duration event is published after its data checkpoint.

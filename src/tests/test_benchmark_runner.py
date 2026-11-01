@@ -500,3 +500,31 @@ def test_drive_can_publish_after_restore_from_preserved_generation(tmp_path, mon
     again = tmp_path / "again"
     Checkpoints(again, remote).restore()
     assert (again / file.relative_to(local)).read_bytes() == original + b"  "
+
+
+def test_drive_save_repairs_plain_mirror_when_restore_used_a_backup(tmp_path, monkeypatch):
+    from src.benchmark import checkpoints
+
+    local, remote = tmp_path / "local", tmp_path / "remote"
+    paper = seed_version(local)
+    cp = Checkpoints(local, remote)
+    cp.save(["2604.20535"])
+    file = paper / "metadata.json"
+    original = file.read_bytes()
+    file.write_bytes(original + b" ")
+    write = checkpoints.write_json
+
+    def fail_index(path, value):
+        if path == remote / "INDEX.json":
+            raise OSError("interrupted")
+        return write(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(checkpoints, "write_json", fail_index)
+        with pytest.raises(OSError):
+            cp.save(["2604.20535"])
+    restored = tmp_path / "restored"
+    next_cp = Checkpoints(restored, remote)
+    next_cp.restore()
+    next_cp.save(["2604.20535"])
+    assert (remote / file.relative_to(local)).read_bytes() == original
