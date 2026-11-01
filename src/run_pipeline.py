@@ -416,6 +416,7 @@ def run(
     job_queue: RedisJobQueue | None = None,
     scheduler: AdaptiveBatchScheduler | None = None,
     on_version: Callable[[dict], None] | None = None,
+    adaptive_pacing: bool = False,
 ) -> dict:
     """Discover ``ids``, then download and extract every version not done yet."""
     if scheduler is not None and job_queue is not None:
@@ -442,7 +443,13 @@ def run(
     lock = WorkDirLock(work_dir)
     lock.acquire()  # raises WorkDirLockedError if another run uses this work_dir
     archive_dir = work_dir / "archives" if keep_archives else None
-    client = client or HttpClient(get_arxiv_limiter(), config.USER_AGENT)
+    client = client or HttpClient(
+        get_arxiv_limiter(),
+        config.USER_AGENT,
+        max_attempts=config.ARXIV_MAX_ATTEMPTS,
+        max_backoff_s=config.ARXIV_MAX_BACKOFF_S,
+        adaptive_pacing=adaptive_pacing,
+    )
 
     started_at, t0 = _now(), time.perf_counter()
     requests_before = client.requests_sent
@@ -581,6 +588,8 @@ def run(
             if client.limiter.min_gap_s is not None
             else None,
             "breaker_trips": client.breaker_trips,
+            "adaptive_pacing": getattr(client, "adaptive_pacing", False),
+            "pace_s_end": round(client.limiter.min_interval_s, 2),
             "keep_extensions": sorted(keep_extensions),
             **summarize(ids, found, missing, state, data_root),
         }
@@ -674,6 +683,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-archives", action="store_true", help="keep raw /src/ responses")
     parser.add_argument("--no-references", action="store_true", help="skip Semantic Scholar")
     parser.add_argument("--refresh-metadata", action="store_true", help="re-run discovery")
+    parser.add_argument(
+        "--adaptive-pacing",
+        action="store_true",
+        help="slow the arXiv pace after HTTP 429 and win it back after 20 successes",
+    )
     parser.add_argument("--no-progress", action="store_true", help="log lines instead of a bar")
     parser.add_argument("--dry-run", action="store_true", help="only list the IDs to crawl")
     parser.add_argument("--redis-url", help="enable parser queue mode with this Redis URL")
@@ -732,6 +746,7 @@ def main(argv: list[str] | None = None) -> int:
             label=label,
             job_queue=queue,
             scheduler=scheduler,
+            adaptive_pacing=args.adaptive_pacing,
         )
     except KeyboardInterrupt:
         print("interrupted: re-run the same command to resume", file=sys.stderr)

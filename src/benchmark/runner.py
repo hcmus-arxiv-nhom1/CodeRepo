@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from importlib.metadata import distributions
@@ -42,6 +43,9 @@ class BenchmarkConfig:
     snapshot: str | None = None
     storage_backend: str = "drive"
     hf_repo_id: str | None = None
+    chunk_attempts: int = 3  # tries per chunk before it is recorded as incomplete
+    chunk_cooldown_s: float = 300.0  # wait before try k+1 is k x this (arXiv 429 windows)
+    adaptive_pacing: bool = False  # spec 0004: slow the pace after HTTP 429
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,8 @@ def plan_chunks(cfg: BenchmarkConfig) -> list[Chunk]:
         raise ValueError("Invalid benchmark selection")
     if cfg.checkpoint_s <= 0 or (cfg.count is not None and cfg.count < 1):
         raise ValueError("Count and checkpoint interval must be positive")
+    if cfg.chunk_attempts < 1 or cfg.chunk_cooldown_s < 0:
+        raise ValueError("Chunk attempts must be >= 1 and the cooldown not negative")
     if (
         not cfg.ranges
         or len(set(cfg.ranges)) != len(cfg.ranges)
@@ -221,6 +227,7 @@ def run_child(payload: dict) -> None:
         progress=False,
         label=payload["owner"],
         on_version=checkpoint,
+        adaptive_pacing=payload.get("adaptive_pacing", False),
     )
 
 
@@ -261,6 +268,14 @@ def export_rescue(local: Path, stage: Path | None = None) -> Path:
                 if file.is_file() and file.name != "run.lock":
                     archive.write(file, f"{prefix}/{file.relative_to(folder).as_posix()}")
     return path
+
+
+def _cooldown(measurements, seconds: float) -> None:
+    """Sleep in one-second steps so the session sampler keeps checking while we wait."""
+    deadline = time.monotonic() + seconds
+    while (left := deadline - time.monotonic()) > 0:
+        measurements.check()
+        time.sleep(min(1.0, left))
 
 
 def timing_audit(local: Path) -> dict:
@@ -327,6 +342,7 @@ def run_benchmark(
     measurements = None
     run_ready = False
     result = None
+    incomplete: list[dict] = []
     session_start = time.perf_counter()
     try:
         manifest = prepare_run(cfg, drive_root / "runs", revision, resume=resume)
@@ -408,7 +424,11 @@ def run_benchmark(
         # Initial durable manifest/session, even if discovery never succeeds.
         cp.save([], phase="initial")
         last_exit = None
-        for chunk in chunks:
+        # A chunk that stays incomplete (arXiv 429 beyond the retry budget) is retried after
+        # a cooldown, then recorded and skipped: one stubborn version must not stop the run.
+        queue = deque((c, 1) for c in chunks)
+        while queue:
+            chunk, tries = queue.popleft()
             measurements.check()
             if _chunk_complete(chunk, local, cfg.references):
                 print(f"Verified complete: {chunk.owner} {chunk.offset}", flush=True)
@@ -427,6 +447,7 @@ def run_benchmark(
                 references=cfg.references,
                 snapshot=str(snapshot_index) if snapshot_index else None,
                 hf_repo_id=cfg.hf_repo_id if hub else None,
+                adaptive_pacing=cfg.adaptive_pacing,
             )
             payload_path = work / "chunk.json"
             write_json(payload_path, payload)
@@ -538,9 +559,27 @@ def run_benchmark(
                     f"Chunk exit {code}; inspect {prof / 'console.log'} and work/run.log"
                 )
             if not _chunk_complete(chunk, local, cfg.references):
-                raise RuntimeError("Chunk QA incomplete; evidence retained, resume to retry")
+                if tries < cfg.chunk_attempts:
+                    wait = cfg.chunk_cooldown_s * tries
+                    print(
+                        f"Chunk {chunk.owner} {chunk.offset} incomplete (try {tries}/"
+                        f"{cfg.chunk_attempts}); cooling down {wait:.0f}s",
+                        flush=True,
+                    )
+                    measurements.phase = "cooldown"
+                    _cooldown(measurements, wait)
+                    queue.appendleft((chunk, tries + 1))
+                else:
+                    incomplete.append(dict(owner=chunk.owner, offset=chunk.offset, tries=tries))
+                    print(
+                        f"Chunk {chunk.owner} {chunk.offset} still incomplete after {tries} "
+                        "tries; continuing, resume later to repair it",
+                        flush=True,
+                    )
+                continue
         measurements.phase = "qa-and-reports"
         result = coverage(cfg, local)
+        result["incomplete_chunks"] = incomplete
         result["final_corpus_complete"] = result["final_complete"]
         result.update(timing_audit(local))
         result["final_complete"] = result["final_complete"] and result["timing_complete"]
@@ -616,6 +655,7 @@ def run_benchmark(
                 )
             if result is None:
                 result = cleanup("local-QA", lambda: coverage(cfg, local)) or {}
+                result["incomplete_chunks"] = incomplete
                 result["final_corpus_complete"] = result.get("final_complete", False)
             result.update(
                 cleanup("timing-audit", lambda: timing_audit(local)) or {"timing_complete": False}

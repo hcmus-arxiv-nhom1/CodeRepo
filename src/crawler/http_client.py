@@ -139,6 +139,8 @@ class ResumableBody(io.RawIOBase):
             resp.close()
             if rejected == MAX_RESUME_REJECTIONS:
                 raise _CutBody(f"{why}; resume answered {resp.status_code} {rejected} times")
+            if resp.status_code == 429:
+                self._client._pace_up()
             self._client._backoff(rejected, retry_after)
         m = _CONTENT_RANGE_RE.match(resp.headers.get("Content-Range", ""))
         if resp.status_code != 206 or m is None or int(m.group(1)) != self.position:
@@ -171,6 +173,11 @@ class HttpClient:
         breaker_pause_s: tuple[float, float] = (900.0, 1800.0),
         breaker_interval_s: float = 5.0,
         max_breaker_trips: int = 3,
+        adaptive_pacing: bool = False,
+        pacing_max_s: float = 10.0,
+        pacing_up: float = 1.5,
+        pacing_down_s: float = 0.5,
+        pacing_streak: int = 20,
         rng: Callable[[], float] = random.random,
     ) -> None:
         self.limiter = limiter
@@ -193,6 +200,16 @@ class HttpClient:
         self._consecutive_403 = 0
         self.breaker_trips = 0
         self.requests_sent = 0
+        # Adaptive pacing (spec 0004): a 429 slows the pace by x pacing_up (never above
+        # pacing_max_s); pacing_streak successes in a row win back pacing_down_s, never
+        # below the pace the client started with. Off by default: the pace only ever grows.
+        self.adaptive_pacing = adaptive_pacing
+        self.pacing_max_s = pacing_max_s
+        self.pacing_up = pacing_up
+        self.pacing_down_s = pacing_down_s
+        self.pacing_streak = pacing_streak
+        self._base_interval_s = limiter.min_interval_s
+        self._ok_streak = 0
 
     # ----------------------------------------------------------------- public
 
@@ -307,11 +324,15 @@ class HttpClient:
                     self._backoff(attempt, retry_after)
                 continue
             self._consecutive_403 = 0
+            if status == 429:
+                self._pace_up()
             if status in RETRYABLE_STATUS:
                 last_reason = f"HTTP {status}"
                 if attempt < attempts:
                     self._backoff(attempt, retry_after)
                 continue
+            if 200 <= status < 300:
+                self._pace_ok()
             return FetchResult(
                 url=url,
                 status=status,
@@ -327,6 +348,36 @@ class HttpClient:
                 wait_s=self.limiter.wait_s - wait_before,
             )
         raise FetchError(url, last_reason, last_status, attempts)
+
+    def _pace_floor(self) -> float:
+        # after a circuit-breaker trip the slower breaker pace is the floor
+        return max(self._base_interval_s, self.breaker_interval_s if self.breaker_trips else 0.0)
+
+    def _pace_up(self) -> None:
+        if not self.adaptive_pacing:
+            return
+        self._ok_streak = 0
+        current = self.limiter.min_interval_s
+        new = min(self.pacing_max_s, round(current * self.pacing_up, 2))
+        if new > current:
+            self.limiter.set_min_interval(new)
+            log.info("adaptive pacing: %.2f -> %.2f s after HTTP 429", current, new)
+
+    def _pace_ok(self) -> None:
+        if not self.adaptive_pacing:
+            return
+        self._ok_streak += 1
+        current, floor = self.limiter.min_interval_s, self._pace_floor()
+        if self._ok_streak >= self.pacing_streak and current > floor:
+            new = max(floor, round(current - self.pacing_down_s, 2))
+            self.limiter.set_min_interval(new)
+            self._ok_streak = 0
+            log.info(
+                "adaptive pacing: %.2f -> %.2f s after %d successes",
+                current,
+                new,
+                self.pacing_streak,
+            )
 
     def _backoff(self, attempt: int, retry_after: str | None) -> None:
         delay = None

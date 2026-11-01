@@ -258,3 +258,68 @@ def test_no_backoff_after_the_last_attempt():
     assert err.value.attempts == 2 and starts == [0.0, 3.0]  # one backoff (2 s), pace wins
     next_start = client.limiter._next_start  # noqa: SLF001
     assert next_start == 3.0 + 3.0  # the 3 s pace only, no 4 s backoff after attempt 2
+
+
+def test_arxiv_retry_budget_outlasts_a_minutes_long_429_window():
+    """30/10 and 01/11: 5 attempts spanned 33 s while arXiv kept answering 429 for longer."""
+    from src import config
+
+    clock, starts = FakeClock(), []
+    responses = [FakeResponse(429)] * 7 + [FakeResponse(200, b"ok")]
+    client = make_client(
+        scripted(responses, clock, starts),
+        clock,
+        max_attempts=config.ARXIV_MAX_ATTEMPTS,
+        max_backoff_s=config.ARXIV_MAX_BACKOFF_S,
+    )
+    res = client.get("https://export.arxiv.org/src/2604.20926v3")
+    assert res.status == 200 and res.attempts == 8
+    assert starts[-1] == 3 + 4 + 8 + 16 + 32 + 64 + 120  # 2**n s backoff, capped at 120 s
+
+
+def _ok_client(statuses, clock, **kw):
+    responses = [FakeResponse(s, b"ok") for s in statuses]
+    return make_client(scripted(responses, clock, []), clock, **kw)
+
+
+def test_adaptive_pacing_slows_after_429_and_wins_the_pace_back():
+    clock = FakeClock()
+    client = _ok_client([429] + [200] * 40, clock, adaptive_pacing=True, pacing_streak=5)
+    url = "https://export.arxiv.org/x"
+    client.get(url)
+    assert client.limiter.min_interval_s == 4.5  # 3.0 x 1.5 after the 429
+    for _ in range(4):  # the first success after the 429 counts too: 5 in a row
+        client.get(url)
+    assert client.limiter.min_interval_s == 4.0
+    for _ in range(10):
+        client.get(url)
+    assert client.limiter.min_interval_s == 3.0  # never below the starting pace
+    for _ in range(10):
+        client.get(url)
+    assert client.limiter.min_interval_s == 3.0
+
+
+def test_adaptive_pacing_is_capped_and_off_by_default():
+    clock = FakeClock()
+    capped = _ok_client([429] * 3 + [200], clock, adaptive_pacing=True, pacing_max_s=5.0)
+    capped.get("https://export.arxiv.org/x")
+    assert capped.limiter.min_interval_s == 5.0  # 3 -> 4.5 -> 5.0, then no further growth
+    plain = _ok_client([429, 200], FakeClock())
+    plain.get("https://export.arxiv.org/x")
+    assert plain.limiter.min_interval_s == 3.0
+
+
+def test_adaptive_pacing_never_goes_below_the_breaker_pace():
+    clock = FakeClock()
+    client = _ok_client(
+        [403] * 3 + [200] * 12,
+        clock,
+        adaptive_pacing=True,
+        pacing_streak=3,
+        breaker_pause_s=(1.0, 1.0),
+    )
+    client.get("https://export.arxiv.org/x")  # three 403s trip the breaker, then one success
+    assert client.breaker_trips == 1 and client.limiter.min_interval_s == 5.0
+    for _ in range(11):
+        client.get("https://export.arxiv.org/x")
+    assert client.limiter.min_interval_s == 5.0  # the breaker pace is the floor now

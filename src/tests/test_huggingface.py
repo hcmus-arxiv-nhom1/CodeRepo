@@ -294,6 +294,7 @@ def test_hf_run_claim_is_unique_without_shift_marker():
     assert "runs/run-a/MANIFEST.json" in hub.files()
     assert "runs/run-b/MANIFEST.json" in hub.files()
 
+
 @pytest.mark.parametrize("same_id", [False, True])
 def test_hf_claim_handles_concurrent_repo_commit(monkeypatch, same_id):
     import httpx
