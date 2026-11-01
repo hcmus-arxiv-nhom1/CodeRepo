@@ -8,7 +8,8 @@ releases it when the process ends, even after ``kill -9`` or a lost Colab sessio
 there is never a stale lock to delete by hand.
 
 It protects one machine only. Two Colab sessions working on the same Google Drive
-folder are prevented by the shift hand-over marker of the crawl notebook.
+folder are not coordinated by this lock. Never run the same run ID concurrently.
+Separate runtimes also do not share the arXiv rate limiter.
 """
 
 from __future__ import annotations

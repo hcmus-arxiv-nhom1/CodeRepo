@@ -2,9 +2,8 @@
 
 Every completed version/metadata/journal file is mirrored byte-for-byte under
 the run's remote folder (not zipped); M2 can read the Drive corpus directly.
-`INDEX.json` is the single, atomically-replaced pointer to the current
-mirrored state, written only after every file in this save has been copied
-and read back verified.
+`INDEX.json` identifies the committed state. Previous mutable contents are
+preserved by hash before the plain mirror is replaced; restore verifies both.
 """
 
 # Drafted with assistance from OpenAI Codex, disclosed per course rules.
@@ -58,11 +57,9 @@ def prepare_drive(root: Path, team_id: str, *, initialize: bool = False) -> None
 class Checkpoints:
     """A plain mirror of the run's raw corpus/work tree, kept on Drive as real folders.
 
-    Each file is copied through a sibling temp name and verified by read-back hash
-    before the atomic rename, so a kill mid-copy never corrupts a previously
-    committed file. `INDEX.json` (the manifest of every mirrored file's hash) is
-    replaced last; a kill between file copies just leaves it pointing at the
-    previous, still-valid, generation.
+    The previous content of a changed committed file is stored by SHA-256 before
+    the plain mirror is replaced. INDEX.json is written last; restore can use the
+    verified backup if an interrupted save left the mirror ahead of the index.
     """
 
     def __init__(self, local: Path, remote: Path):
@@ -71,6 +68,7 @@ class Checkpoints:
         self.generation = None
         self.hashes: dict[str, str] = {}
         self.directories: set[str] = set()
+        self.repairs: set[str] = set()
         self._loaded = False
 
     @staticmethod
@@ -97,6 +95,7 @@ class Checkpoints:
             self.generation = head["generation"]
             self.hashes = dict(head["files"])
             self.directories = set(head["directories"])
+            self.repairs = set(head.get("repairs", []))
         self._loaded = True
 
     def save(
@@ -171,11 +170,14 @@ class Checkpoints:
                 except ValueError:
                     continue  # torn metadata/references write; retry at the next checkpoint
             sha = digest(path)
-            if self.hashes.get(name) == sha:
+            if self.hashes.get(name) == sha and name not in self.repairs:
                 files[name] = sha
                 continue
             destination = self.remote / name
             destination.parent.mkdir(parents=True, exist_ok=True)
+            old_sha = self.hashes.get(name)
+            if old_sha and old_sha != sha:
+                self._preserve_previous(destination, old_sha)
             tmp = destination.parent / f"{destination.name}.tmp-{uuid.uuid4().hex[:8]}"
             try:
                 shutil.copyfile(path, tmp)
@@ -185,6 +187,7 @@ class Checkpoints:
             finally:
                 tmp.unlink(missing_ok=True)
             files[name] = sha
+            self.repairs.discard(name)
             copied_bytes += path.stat().st_size
         generation = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f") + "-" + uuid.uuid4().hex[:8]
         rec = dict(
@@ -202,9 +205,32 @@ class Checkpoints:
         self.generation, self.hashes, self.directories = generation, files, set(rec["directories"])
         write_json(
             self.local / ".checkpoint-head.json",
-            dict(generation=generation, files=files, directories=rec["directories"]),
+            dict(
+                generation=generation,
+                files=files,
+                directories=rec["directories"],
+                repairs=sorted(self.repairs),
+            ),
         )
         return rec
+
+    def _preserve_previous(self, source: Path, expected: str) -> None:
+        if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+            raise ValueError("Invalid checkpoint hash")
+        backup = self.remote / ".checkpoint-objects" / expected[:2] / expected
+        if backup.is_file() and self._verify(backup, expected):
+            return
+        if not source.is_file() or not self._verify(source, expected):
+            raise ValueError(f"Previous checkpoint file mismatch: {source}")
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        tmp = backup.parent / f"{backup.name}.tmp-{uuid.uuid4().hex[:8]}"
+        try:
+            shutil.copyfile(source, tmp)
+            if not self._verify(tmp, expected):
+                raise OSError("Checkpoint backup verification failed")
+            tmp.replace(backup)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def restore(self) -> dict:
         index_path = self.remote / "INDEX.json"
@@ -224,7 +250,12 @@ class Checkpoints:
                 raise ValueError("Unsafe checkpoint member")
             source = self.remote / name
             if not source.is_file() or not self._verify(source, expected):
-                raise ValueError(f"Restored file mismatch: {name}")
+                if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+                    raise ValueError(f"Invalid checkpoint hash: {name}")
+                source = self.remote / ".checkpoint-objects" / expected[:2] / expected
+                if not source.is_file() or not self._verify(source, expected):
+                    raise ValueError(f"Restored file mismatch: {name}")
+                self.repairs.add(name)
             destination = self.local / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
@@ -235,7 +266,12 @@ class Checkpoints:
         )
         write_json(
             self.local / ".checkpoint-head.json",
-            dict(generation=self.generation, files=self.hashes, directories=index["directories"]),
+            dict(
+                generation=self.generation,
+                files=self.hashes,
+                directories=index["directories"],
+                repairs=sorted(self.repairs),
+            ),
         )
         self._loaded = True
         # The latest duration event is published after its data checkpoint.

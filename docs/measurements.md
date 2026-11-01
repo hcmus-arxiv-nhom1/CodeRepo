@@ -23,7 +23,7 @@ remain resumable only with their original revision; do not combine their measure
 | Corpus/reference statistics | `corpus_summary.csv`: completion and TeX counts, mean uncompressed bytes before/after extension filtering, mean references, reference-list success per required ID, resolved S2-ID rate and metadata completeness (S2 ID + title + authors + date/year) per citation. Unresolved/empty references remain in the denominator. |
 
 The sampling boundary starts after run identity/preflight validation and before
-corpus restore, and ends after final corpus sync and shift release. Environment
+corpus restore, and ends after final corpus sync. Environment
 installation, Drive authorization, final telemetry publication/collection, final
 evidence re-export/download and offline gaps are outside this boundary. Earlier
 report generation inside the runner is included. Monitoring has real overhead,
@@ -41,14 +41,14 @@ directory while RAM/disk/time are already being observed.
 The corpus checkpoint itself is a plain mirror, not an archive: completed version
 files, metadata/references and the `work/` journal are copied as real files/folders
 under `runs/<RUN_ID>/` on Drive (M2 reads the corpus there directly, no unzip step).
-Each file is copied through a temp name and read back hash-verified before an atomic
-rename, so a kill mid-copy can never corrupt a file already on Drive. `INDEX.json`
-(the manifest of every mirrored file's hash, plus the version-directory list) is
-replaced last; a kill between file copies just leaves it pointing at the previous,
-still-valid, state. Restore re-verifies every file's hash against `INDEX.json` before
-copying it back and raises if any mismatch; there is no older generation to fall back
-to, so a corrupted mirrored file blocks restore until it is removed from Drive and
-re-checkpointed, instead of silently restoring stale data.
+Changed committed files first preserve their old bytes as verified, content-addressed
+objects under `.checkpoint-objects/`; files are then copied through a temporary name,
+verified and replaced. `INDEX.json` is published last. If interrupted before index
+publication, restore verifies the plain mirror and falls back to the old object when
+needed. Existing checkpoints already corrupt before this revision cannot be repaired
+automatically. Objects are retained, so Drive storage can grow with updated journals.
+The visible raw mirror may be ahead of the index after interruption: restore and verify
+the committed generation before consuming it for M2.
 
 Restore overlays independent telemetry after verifying the corpus checkpoint.
 Reports deduplicate paper events copied both through checkpoints and telemetry.
@@ -90,10 +90,8 @@ marked as legacy in the measurement audit.
 
 ## Before optimizing
 
-If the Drive shift marker disappears, the runner retries the read briefly and then
-stops without recreating/claiming the marker. Losing ownership or Drive visibility
-prevents final remote checkpoint publication. Cleanup errors are recorded separately
-in `work/cleanup_errors.json`, with the original exception preserved.
+Each run retains its own checkpoint and evidence under its run ID. An unsuccessful
+checkpoint prevents the runner from claiming successful remote publication.
 
 Local measurement finalization and evidence export are still attempted. Buffered
 telemetry is copied from local staging into `work/measurements`; failed remote
@@ -107,7 +105,35 @@ does not imply that its files were uploaded to Drive. Diagnose the original erro
 and QA before deciding whether/how to resume; do not restart a large sample blindly.
 
 Run a new 200-ID sample with the same IDs, all versions and references. Also test a
-graceful session-budget handoff/resume and an intentional runtime loss on a separate
+checkpoint/resume and an intentional runtime loss on a separate
 small sample; verify restore and incomplete-timing reporting. Retain the original
 200-ID baseline untouched. The fake-response test suite does not replace a live
 Colab/Drive smoke test.
+
+## Snapshot-first discovery measurements
+
+With BenchmarkConfig.snapshot enabled, the input SHA-256 is part of the run manifest.
+work/snapshot_index.jsonl is a compact, checksum-verified subset of all selected IDs;
+work/snapshot_preparation/<session>.json records subset preparation or reuse costs.
+These costs are included in session wall/RAM/disk sampling and added once per session to
+the discovery_time CSV metric, in addition to per-chunk discovery_s. Do not add them again
+to session wall time. Input manifest hashing plus Kaggle download/unzip are pre-session
+setup costs and are disclosed separately. Historical version title/author API requests
+remain in per-chunk discovery time. Coverage is relative to the recorded snapshot release.
+
+## Hugging Face storage revision
+
+New HF runs include configured snapshot bytes, local checkpoint mirror, temporary Hub
+read cache and Xet cache in disk sampling. Old benchmark CSVs are not retroactively
+corrected: the earlier snapshot smoke disk_max omitted its multi-GB input. HF upload and
+restore costs are measured in session wall/RAM; periodic uploads also appear inside chunk
+profiles. Checkpoint events include upload plus completion-pointer publication, followed
+by an independently published timing record. Final evidence publication after the sampler
+finishes is explicitly outside the session interval. See huggingface_colab.md for scope.
+
+
+HF commit-rate revision: resources and paper timing segments share one telemetry
+commit per 120-second flush (Drive stays 30 seconds); RSS sampling stays one second.
+Durable telemetry intervals can exceed this target while upload/quota waits block.
+Commit budget/cooldown waits inside the session are included in wall time. Missing
+unpublished tails remain unknown after runtime loss, never zero-filled.
