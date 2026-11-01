@@ -55,6 +55,21 @@ RESPONSE_RE = re.compile(r"\b(?:GET|POST) (https?://[^\s/]+)\S* -> (\d{3})\b")
 FAILURE_RE = re.compile(r"\b(?:GET|POST) (https?://[^\s/]+)\S* failed \(")
 # "backing off 4.0 s before next arXiv request" and "... pausing 900 s, pacing now 5.0 s"
 BACKOFF_RE = re.compile(r"\bbacking off ([\d.]+) s\b|\bpausing ([\d.]+) s\b")
+# "GET https://export.arxiv.org/src/... done: 200 (123 B, 3.00 s, attempt 1, 0 resume(s))"
+DONE_RE = re.compile(r"\bGET (https?://[^\s/]+)\S* done: \d{3} \((\d+) B,")
+# "adaptive pacing: 3.00 -> 4.50 s after HTTP 429"
+PACE_RE = re.compile(r"\badaptive pacing: [\d.]+ -> ([\d.]+) s\b")
+LOG_TIME_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d):\d\d")
+TIMELINE_COLUMNS = [
+    "minute_utc",
+    "n_200",
+    "n_206",
+    "n_429",
+    "n_5xx",
+    "mb_downloaded",
+    "backoff_s",
+    "pace_s",
+]
 
 
 def source_of(host_url: str) -> str | None:
@@ -192,6 +207,48 @@ def checkpoint_seconds(work_dirs: list[Path]) -> tuple[float, float]:
         )
         for included in (True, False)
     )
+
+
+def request_timeline(work_dirs: list[Path]) -> list[dict]:
+    """arXiv responses, megabytes and backoff per minute, read from run.log.
+
+    A throttled run (HTTP 429, slow or cut transfers) shows here as the 429 count rising and
+    the megabytes falling; ``pace_s`` is the pace after adaptive pacing, empty when it is off.
+    """
+    minutes: dict[str, dict] = {}
+    pace = None
+    for work_dir in work_dirs:
+        log = work_dir / "run.log"
+        if not log.exists():
+            continue
+        with open(log, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not (t := LOG_TIME_RE.match(line)):
+                    continue
+                row = minutes.setdefault(t.group(1), dict.fromkeys(TIMELINE_COLUMNS[1:], 0))
+                if m := RESPONSE_RE.search(line):
+                    if source_of(m.group(1)) == "arxiv":
+                        code = int(m.group(2))
+                        key = {200: "n_200", 206: "n_206", 429: "n_429"}.get(code)
+                        key = key or ("n_5xx" if code >= 500 else None)
+                        if key:
+                            row[key] += 1
+                elif (m := DONE_RE.search(line)) and source_of(m.group(1)) == "arxiv":
+                    row["mb_downloaded"] += int(m.group(2)) / 1e6
+                if m := BACKOFF_RE.search(line):
+                    row["backoff_s"] += float(m.group(1) or m.group(2))
+                if m := PACE_RE.search(line):
+                    pace = float(m.group(1))
+                row["pace_s"] = pace if pace is not None else ""
+    return [
+        {
+            "minute_utc": minute,
+            **row,
+            "mb_downloaded": round(row["mb_downloaded"], 2),
+            "backoff_s": round(row["backoff_s"], 1),
+        }
+        for minute, row in sorted(minutes.items())
+    ]
 
 
 def references_rows(ids: list[str], rows: list[dict], work_dirs: list[Path]) -> list[dict]:
@@ -445,6 +502,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     written = ["papers_stats.csv", "references_stats.csv"]
+    if timeline := request_timeline(work_dirs):
+        write_csv(args.out / "request_timeline.csv", timeline, TIMELINE_COLUMNS)
+        written.append("request_timeline.csv")
     bench, samples = [], []
     dirs = profile_dirs(args.profile_dir or work_dirs[0] / "profile")
     if dirs:

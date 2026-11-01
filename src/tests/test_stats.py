@@ -284,3 +284,29 @@ def test_paper_timing_export_deduplicates_durable_events_and_keeps_incomplete_at
     by_attempt = {r["attempt_id"]: r for r in rows}
     assert by_attempt["a"]["lifecycle_s"] == 8 and by_attempt["a"]["source_work_s"] == 3
     assert by_attempt["b"]["lifecycle_s"] is None and not by_attempt["b"]["complete"]
+
+
+def test_request_timeline_shows_a_throttled_run_minute_by_minute(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    host = "https://export.arxiv.org/src/2604.20535v1"
+    (work / "run.log").write_text(
+        f"2026-11-01 14:03:46,100 INFO GET {host} -> 200 (full body, gap 3.05 s)\n"
+        "2026-11-01 14:03:47,100 INFO "
+        f"GET {host} done: 200 (2000000 B, 0.20 s, attempt 1, 0 resume(s))\n"
+        f"2026-11-01 14:04:10,000 INFO GET {host} -> 429 (full body, gap 3.05 s)\n"
+        "2026-11-01 14:04:10,500 INFO backing off 4.0 s before next arXiv request\n"
+        "2026-11-01 14:04:11,000 INFO adaptive pacing: 3.00 -> 4.50 s after HTTP 429\n"
+        f"2026-11-01 14:04:20,000 INFO GET {host} -> 206 (bytes=5-, gap 4.50 s)\n"
+        "2026-11-01 14:04:21,000 INFO S2 POST "
+        "https://api.semanticscholar.org/graph/v1/paper/batch -> 429 (attempt 1)\n"
+        "continuation line without a timestamp\n",
+        encoding="utf-8",
+    )
+    rows = stats.request_timeline([work])
+    assert [r["minute_utc"] for r in rows] == ["2026-11-01 14:03", "2026-11-01 14:04"]
+    first, second = rows
+    assert (first["n_200"], first["mb_downloaded"], first["pace_s"]) == (1, 2.0, "")
+    assert (second["n_429"], second["n_206"], second["backoff_s"]) == (1, 1, 4.0)
+    assert second["pace_s"] == 4.5  # Semantic Scholar's 429 is not counted as arXiv's
+    assert stats.request_timeline([tmp_path / "missing"]) == []

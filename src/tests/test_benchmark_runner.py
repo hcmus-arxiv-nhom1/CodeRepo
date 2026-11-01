@@ -220,7 +220,7 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(
 
     monkeypatch.setattr(fixture, "VERSIONS", {"2604.20535": 1})
     monkeypatch.setattr(
-        "src.run_pipeline.HttpClient", lambda *a: fixture.client_for(fixture.FakeArxiv())
+        "src.run_pipeline.HttpClient", lambda *a, **kw: fixture.client_for(fixture.FakeArxiv())
     )
     drive = tmp_path / "drive"
     drive.mkdir()
@@ -516,3 +516,87 @@ def test_run_without_shift_ignores_and_preserves_old_marker(tmp_path, monkeypatc
             cfg, drive_root=root, local_root=tmp_path / "local", revision="abc", team_id="team"
         )
     assert (root / "SHIFT.json").read_text() == "legacy unreadable marker"
+
+
+@pytest.mark.parametrize("always_incomplete", [False, True])
+def test_incomplete_chunk_is_retried_after_a_cooldown_then_recorded_not_fatal(
+    tmp_path, monkeypatch, always_incomplete
+):
+    """01/11: one version answered 429 five times and the whole run stopped at the chunk QA."""
+    from src.benchmark import runner
+    from src.tests import test_run_pipeline as fixture
+
+    monkeypatch.setattr(fixture, "VERSIONS", {"2604.20535": 1})
+    monkeypatch.setattr(
+        "src.run_pipeline.HttpClient", lambda *a, **kw: fixture.client_for(fixture.FakeArxiv())
+    )
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    prepare_drive(drive, "team", initialize=True)
+    launches, calls = [], []
+
+    class FinishedProcess:
+        def __init__(self, command, **kwargs):
+            launches.append(command)
+            payload = json.loads(Path(command[-1]).read_text())
+            assert payload["adaptive_pacing"] is True
+            profile = Path(command[command.index("--out") + 1])
+            runner.run_child(payload)
+            (profile / "profile_summary.json").write_text(
+                json.dumps(
+                    dict(
+                        wall_s=1,
+                        rss_max_mb=10,
+                        rss_mean_mb=8,
+                        disk_max_mb=1,
+                        output_mb=1,
+                        started_at="2026-10-30T00:00:00Z",
+                        exit_code=0,
+                    )
+                )
+            )
+            (profile / "profile_samples.csv").write_text(
+                "t_sec,rss_total_mb,n_procs,disk_mb\n0,8,1,1\n"
+            )
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+    real_complete = runner._chunk_complete
+
+    def flaky(chunk, local, references):
+        calls.append(1)
+        if always_incomplete or len(calls) <= 3:
+            return False
+        return real_complete(chunk, local, references)
+
+    monkeypatch.setattr(runner.subprocess, "Popen", FinishedProcess)
+    monkeypatch.setattr(runner, "_chunk_complete", flaky)
+    cfg = BenchmarkConfig(
+        "retry",
+        "sample",
+        ("dang",),
+        count=1,
+        references=False,
+        chunk_attempts=3,
+        chunk_cooldown_s=0,
+        adaptive_pacing=True,
+    )
+    result = runner.run_benchmark(
+        cfg, drive_root=drive, local_root=tmp_path / "local", revision="abc", team_id="team"
+    )
+    if always_incomplete:
+        assert len(launches) == 3
+        assert result["incomplete_chunks"] == [dict(owner="dang", offset=0, tries=3)]
+        assert not result["final_complete"]
+    else:
+        assert len(launches) == 2  # the fourth check passes after the second launch
+        assert result["incomplete_chunks"] == []
+
+
+def test_chunk_retry_settings_are_validated():
+    with pytest.raises(ValueError):
+        plan_chunks(BenchmarkConfig("x", "sample", ("dang",), count=1, chunk_attempts=0))
+    with pytest.raises(ValueError):
+        plan_chunks(BenchmarkConfig("x", "sample", ("dang",), count=1, chunk_cooldown_s=-1))

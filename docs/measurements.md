@@ -137,3 +137,24 @@ commit per 120-second flush (Drive stays 30 seconds); RSS sampling stays one sec
 Durable telemetry intervals can exceed this target while upload/quota waits block.
 Commit budget/cooldown waits inside the session are included in wall time. Missing
 unpublished tails remain unknown after runtime loss, never zero-filled.
+
+## Throttling: chunk retries, retry budget and the request timeline (spec 0004)
+
+- A chunk whose QA fails (usually one version that arXiv refused with HTTP 429) is no longer fatal.
+  The runner waits `chunk_cooldown_s x k` (default 300 s, 600 s) and retries the chunk (default
+  3 tries); finished versions are skipped, so only the failed ones are fetched again. A chunk still
+  incomplete after the last try is listed in `coverage.json/incomplete_chunks` and the run goes on;
+  `final_complete` stays false until a later resume repairs it. Cooldown time is inside the session
+  wall time (phase `cooldown`). A crashed child (exit code other than 0, e.g. `BlockedError`)
+  still stops the run.
+- arXiv requests (sources, OAI) are retried up to 8 times with `2**n` s backoff capped at 120 s
+  (at most 246 s). Discovery's API calls keep 2 attempts before falling back to OAI-PMH.
+- `book_csv/request_timeline.csv` has one row per minute of `run.log`: arXiv responses by status
+  (`n_200`, `n_206` Range resumes, `n_429`, `n_5xx`), `mb_downloaded`, `backoff_s` and `pace_s`
+  (the pace set by adaptive pacing, empty when it is off). Plot it to tell a throttled run
+  (429 rising, megabytes falling) from a healthy one.
+- **A/B test of adaptive pacing** (off by default): run the same 200 IDs twice with different run IDs,
+  once with the default and once with `adaptive_pacing=True` added to the `BenchmarkConfig(...)`
+  cell of the notebook (`chunk_attempts` and `chunk_cooldown_s` can be set there too), and compare `wall_time_e2e`,
+  `retry_backoff_wait` and the `n_429` column. Use it in the official run only if it wins; the
+  pace never goes below 3 s either way.

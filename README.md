@@ -100,6 +100,7 @@ python -m src.run_pipeline --ids 2606.30762,2607.00001
 - `--month-end YYMM=N`: last sequence number of a month the range crosses. June 2026 was confirmed with the API as `2606.32040` (stored in `config.MONTH_END`).
 - `--keep-ext .tex,.bib,.bbl`: change the kept extensions (default `.tex,.bib`, as required by M1).
 - `--snapshot <file>`: optional Kaggle snapshot-first discovery, with API enrichment for historical versions.
+- `--adaptive-pacing`: after an HTTP 429 slow the arXiv pace by 1.5x (cap 10 s) and win it back after 20 successes; never below 3 s. Off by default, see [spec 0004](specs/0004-throttle-resilience.md).
 - `--no-references`: skip Semantic Scholar; `--refresh-metadata`: run discovery again for IDs that already have `metadata.json`.
 
 ### How the crawler calls arXiv
