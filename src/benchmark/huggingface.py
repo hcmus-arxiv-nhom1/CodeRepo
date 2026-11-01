@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+from filelock import FileLock
 
 from src.benchmark.checkpoints import Checkpoints, write_json
 
@@ -24,6 +29,67 @@ def remote_name(name):
     return name
 
 
+class CommitBudget:
+    """Shared local sliding-window budget for parent/child commit attempts.
+
+    This cannot account for other runtimes or earlier server-side usage. A 429
+    adds a shared cooldown instead of repeatedly attempting checkpoint commits.
+    """
+
+    def __init__(self, path, *, limit=90, window_s=3600):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = FileLock(str(self.path) + ".lock")
+        self.limit, self.window_s = limit, window_s
+
+    def _state(self):
+        return (
+            json.loads(self.path.read_text())
+            if self.path.exists()
+            else {"attempts": [], "blocked_until": 0}
+        )
+
+    def defer(self, seconds):
+        with self.lock:
+            state = self._state()
+            state["blocked_until"] = max(state["blocked_until"], time.time() + seconds)
+            write_json(self.path, state)
+
+    def reserve(self):
+        while True:
+            with self.lock:
+                now = time.time()
+                state = self._state()
+                attempts = [t for t in state["attempts"] if t > now - self.window_s]
+                until = state["blocked_until"]
+                if len(attempts) >= self.limit:
+                    until = max(until, attempts[0] + self.window_s)
+                if until <= now:
+                    state["attempts"] = attempts + [now]
+                    write_json(self.path, state)
+                    return
+                delay = until - now
+            logging.warning(
+                "HF commit budget/cooldown: %.0f s remaining; retaining local data", delay
+            )
+            time.sleep(min(delay, 30))
+
+
+def commit_retry_delay(exc):
+    headers = exc.response.headers
+    value = headers.get("Retry-After")
+    if value:
+        try:
+            return max(1, float(value))
+        except ValueError:
+            try:
+                return max(1, parsedate_to_datetime(value).timestamp() - time.time())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    match = re.search(r"(?:^|[;,\s])t=(\d+)", headers.get("RateLimit", ""))
+    return max(1, int(match[1])) if match else 3600
+
+
 class HubStore:
     def __init__(self, repo_id, cache):
         os.environ.setdefault("HF_XET_CACHE", str(Path(cache).parent / ".hf-xet-cache"))
@@ -34,6 +100,7 @@ class HubStore:
             raise ValueError("HF_TOKEN missing; enable the Colab Secret")
         self.repo_id, self.cache = repo_id, Path(cache)
         self.api = HfApi(token=token)
+        self.budget = CommitBudget(self.cache / "commit-budget.json")
         info = self.api.repo_info(repo_id, repo_type="dataset")
         if not info.private:
             raise ValueError("Expected a private Hugging Face Dataset")
@@ -70,9 +137,10 @@ class HubStore:
 
         revision = None
         items = list(files.items())
-        for start in range(0, len(items), 50):
-            batch = items[start : start + 50]
+        for start in range(0, len(items), 100):
+            batch = items[start : start + 100]
             for attempt in range(3):
+                self.budget.reserve()
                 head = parent or self.api.repo_info(self.repo_id, repo_type="dataset").sha
                 try:
                     result = self.api.create_commit(
@@ -87,6 +155,11 @@ class HubStore:
                     revision = result.oid
                     break
                 except HfHubHTTPError as exc:
+                    if exc.response is not None and exc.response.status_code == 429:
+                        self.budget.defer(commit_retry_delay(exc))
+                        if attempt == 2:
+                            raise
+                        continue
                     if (
                         parent
                         or exc.response is None

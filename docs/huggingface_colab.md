@@ -59,7 +59,7 @@ an empty local destination; a plain snapshot_download keeps the remote shard lay
 
 ## Checkpoint consistency
 
-Raw deltas are committed in batches of up to 50 files, with Hub parent-commit checks.
+Raw deltas are committed in batches of up to 100 files, with Hub parent-commit checks.
 LATEST.json is replaced only after the data INDEX.json can be read at its pinned commit.
 A partially completed upload never changes the completed pointer. Restore reads all
 corpus/journal files at the pointer revision and verifies hashes, then overlays newer
@@ -93,3 +93,29 @@ Offline tests cover versioned roundtrip, upload interruption before and during c
 corrupt source refusal, empty versions, telemetry restore, shift handoff and SDK argument
 compatibility. A live private-HF smoke with the user's Colab Secret is still required.
 No live Dataset writes were performed while implementing this backend.
+
+
+## HF commit-rate protection
+
+HF can reject repository commit creation independently of normal API request quotas.
+Our observed server response specified 128 commits/hour; this is not a permanent
+published guarantee. HF telemetry now batches resource and paper segments in one
+commit per flush, with a 120-second HF flush target (Drive remains 30 seconds).
+RAM sampling still targets one second and disk sampling 30 seconds. Runtime loss
+can lose up to the unpublished telemetry tail; upload/quota waits can extend it.
+
+A file-locked budget shared by parent and child permits at most 90 commit attempts
+per rolling hour in the same staging root. Raw files stay unpacked and each commit
+contains at most 100 files. The budget waits rather than exceeding its local cap.
+It cannot account for earlier sessions or other tools/runtimes sharing server quota.
+On HTTP 429, all local writers share a cooldown using Retry-After/RateLimit headers,
+with a conservative one-hour fallback when neither is usable; retries are bounded
+at three attempts per batch. Waiting is logged, keeps local data and contributes to
+elapsed benchmark time when inside the session. Sync may exceed checkpoint/session
+budget targets while waiting. Existing completed LATEST pointers remain authoritative.
+
+If finalization fails, export_rescue(LOCAL_ROOT / RUN_ID) downloads raw local data,
+logs and measurements without contacting HF. Preserve that ZIP before resetting.
+Do not label failed finalization as a clean benchmark. The notebook's RESUME option
+loads the saved implementation revision, so resuming an older manifest does not
+automatically apply this fix; use a new run ID for a clean test of the new revision.

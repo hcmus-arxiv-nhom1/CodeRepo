@@ -14,3 +14,4 @@ kaggle>=1.6.0
 redis>=5.0.0
 
 huggingface_hub>=0.34,<2
+filelock>=3.13,<4

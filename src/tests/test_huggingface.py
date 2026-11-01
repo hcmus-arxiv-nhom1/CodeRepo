@@ -158,10 +158,10 @@ def test_hub_sdk_batches_commits_and_uses_pinned_download(tmp_path, monkeypatch)
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
     store = HubStore("team/private", tmp_path / "cache")
-    assert store.commit({f"file-{i}.txt": b"data" for i in range(120)}) == "3"
-    assert calls == [50, 50, 20]
+    assert store.commit({f"file-{i}.txt": b"data" for i in range(120)}) == "2"
+    assert calls == [100, 20]
     assert store.read("INDEX.json", "2") == b"verified"
-    assert downloads and not list((tmp_path / "cache").iterdir())
+    assert downloads and not list((tmp_path / "cache").glob("hf-read-*"))
 
 
 def test_hf_shift_refuses_active_owner_and_detects_takeover(tmp_path):
@@ -179,3 +179,60 @@ def test_hf_shift_refuses_active_owner_and_detects_takeover(tmp_path):
             shift.check()
     finally:
         shift.close(release=False)
+
+
+def test_commit_budget_survives_new_store_and_waits_for_window(tmp_path, monkeypatch):
+    from src.benchmark import huggingface as h
+    from src.tests.helpers import FakeClock
+
+    clock = FakeClock()
+    monkeypatch.setattr(h.time, "time", clock)
+    monkeypatch.setattr(h.time, "sleep", clock.sleep)
+    path = tmp_path / "shared-budget.json"
+    h.CommitBudget(path, limit=2, window_s=60).reserve()
+    h.CommitBudget(path, limit=2, window_s=60).reserve()
+    h.CommitBudget(path, limit=2, window_s=60).reserve()
+    assert clock() == 60
+
+
+@pytest.mark.parametrize("retry_after, expected_delay", [("2", 2), (None, 3600)])
+def test_hub_commit_retries_429_using_server_delay(
+    tmp_path, monkeypatch, retry_after, expected_delay
+):
+    from types import SimpleNamespace
+
+    import httpx
+    import huggingface_hub
+    from huggingface_hub.errors import HfHubHTTPError
+
+    from src.benchmark import huggingface as h
+    from src.tests.helpers import FakeClock
+
+    clock = FakeClock()
+    monkeypatch.setattr(h.time, "time", clock)
+    monkeypatch.setattr(h.time, "sleep", clock.sleep)
+    monkeypatch.setenv("HF_TOKEN", "test-only-token")
+    calls = []
+
+    class Api:
+        def __init__(self, token):
+            self.token = token
+
+        def repo_info(self, *args, **kwargs):
+            return SimpleNamespace(private=True, sha="parent")
+
+        def create_commit(self, *args, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                response = httpx.Response(
+                    429,
+                    headers={"Retry-After": retry_after} if retry_after else {},
+                    request=httpx.Request("POST", "https://huggingface.co/test"),
+                )
+                raise HfHubHTTPError("rate limit", response=response)
+            return SimpleNamespace(oid="done")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    store = h.HubStore("team/private", tmp_path / "cache")
+    assert store.commit({"INDEX.json": b"{}"}) == "done"
+    assert len(calls) == 2 and clock() == expected_delay

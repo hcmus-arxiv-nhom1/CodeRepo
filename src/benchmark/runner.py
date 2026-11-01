@@ -406,12 +406,14 @@ def run_benchmark(
             remote,
             local,
             session_id,
+            flush_s=120 if hub is not None else 30,
             publisher=(
-                lambda path, value: hub.commit(
+                lambda files: hub.commit(
                     {
                         f"runs/{cfg.run_id}/{path.relative_to(remote).as_posix()}": json.dumps(
                             value
                         ).encode()
+                        for path, value in files.items()
                     },
                     "M1 telemetry",
                 )
@@ -603,7 +605,10 @@ def run_benchmark(
                     )
                     + "\n"
                 )
-            print(f"Drive checkpoint verified; post-chunk sync={sync_s:.1f}s", flush=True)
+            print(
+                f"{cfg.storage_backend} checkpoint verified; post-chunk sync={sync_s:.1f}s",
+                flush=True,
+            )
             if code:
                 raise RuntimeError(
                     f"Chunk exit {code}; inspect {prof / 'console.log'} and work/run.log"

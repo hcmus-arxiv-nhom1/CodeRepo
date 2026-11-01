@@ -59,6 +59,7 @@ class SessionMeasurements:
         self.stage, self.remote, self.local = stage, remote / "measurements" / session_id, local
         self.session_id = session_id
         self.publisher = publisher
+        self.pending_publications = {}
         self.extra_disk_paths = tuple(Path(p) for p in extra_disk_paths)
         self.interval_s, self.disk_every_s, self.flush_s = interval_s, disk_every_s, flush_s
         self.started = time.monotonic()
@@ -92,6 +93,7 @@ class SessionMeasurements:
                 ),
             ),
         )
+        self._send_pending()
 
     def _publish(self, name: str, value: dict) -> None:
         write_json(self.stage / name, value)
@@ -103,7 +105,12 @@ class SessionMeasurements:
         if json.loads((self.remote / name).read_text(encoding="utf-8")) != value:
             raise OSError("Telemetry read-back verification failed")
         if self.publisher is not None:
-            self.publisher(self.remote / name, value)
+            self.pending_publications[self.remote / name] = value
+
+    def _send_pending(self):
+        if self.publisher is not None and self.publish_remote and self.pending_publications:
+            self.publisher(dict(self.pending_publications))
+            self.pending_publications.clear()
 
     def sample(self, *, final: bool = False) -> None:
         now = time.monotonic()
@@ -155,6 +162,7 @@ class SessionMeasurements:
                 )
                 self.paper_sequence += 1
                 self.paper_offset += len(complete)
+        self._send_pending()
         self.last_flush = time.monotonic()
 
     def start(self) -> None:
@@ -204,6 +212,7 @@ class SessionMeasurements:
             summary["telemetry_error"] = f"{type(failure).__name__}: {failure}"
         try:
             self._publish("summary.json", summary)
+            self._send_pending()
         except Exception as exc:
             summary.update(complete=False, telemetry_error=f"{type(exc).__name__}: {exc}")
             write_json(self.stage / "summary.json", summary)

@@ -132,3 +132,10 @@ restore costs are measured in session wall/RAM; periodic uploads also appear ins
 profiles. Checkpoint events include upload plus completion-pointer publication, followed
 by an independently published timing record. Final evidence publication after the sampler
 finishes is explicitly outside the session interval. See huggingface_colab.md for scope.
+
+
+HF commit-rate revision: resources and paper timing segments share one telemetry
+commit per 120-second flush (Drive stays 30 seconds); RSS sampling stays one second.
+Durable telemetry intervals can exceed this target while upload/quota waits block.
+Commit budget/cooldown waits inside the session are included in wall time. Missing
+unpublished tails remain unknown after runtime loss, never zero-filled.

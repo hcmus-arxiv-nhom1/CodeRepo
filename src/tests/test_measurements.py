@@ -251,3 +251,24 @@ def test_disk_measurement_includes_snapshot_and_hf_staging(tmp_path, monkeypatch
     )
     sampler.sample()
     assert sampler.rows[-1]["disk_bytes"] >= 2000
+
+
+def test_resource_and_paper_segments_share_one_remote_publication(tmp_path):
+    from src.benchmark.measurements import SessionMeasurements
+
+    batches = []
+    local = tmp_path / "local"
+    sampler = SessionMeasurements(
+        tmp_path / "stage",
+        tmp_path / "remote",
+        local,
+        "batched",
+        publisher=lambda files: batches.append(files),
+    )
+    work = local / "work"
+    work.mkdir(parents=True)
+    (work / "paper_events.jsonl").write_text('{"event":"admitted"}\n')
+    sampler.sample()
+    sampler.flush()
+    assert len(batches) == 2  # start, then one atomic resource + paper publication
+    assert {p.name for p in batches[-1]} == {"samples-000000.json", "papers-000000.json"}
