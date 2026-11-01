@@ -217,13 +217,20 @@ def test_same_owner_second_session_still_requires_explicit_takeover(tmp_path):
     second.close(release=True)
 
 
+@pytest.mark.parametrize("storage_backend", ["drive", "huggingface"])
 @pytest.mark.parametrize("readback_failure", [False, True])
 @pytest.mark.parametrize("snapshot_enabled", [False, True])
 def test_run_orchestrator_profiles_checks_and_exports_without_network(
-    tmp_path, monkeypatch, readback_failure, snapshot_enabled
+    tmp_path, monkeypatch, readback_failure, snapshot_enabled, storage_backend
 ):
     from src.benchmark import runner
     from src.tests import test_run_pipeline as fixture
+
+    if storage_backend == "huggingface":
+        from src.tests.helpers_hub import MemoryHub
+
+        hub = MemoryHub()
+        monkeypatch.setattr("src.benchmark.huggingface.HubStore", lambda *args: hub)
 
     monkeypatch.setattr(fixture, "VERSIONS", {"2604.20535": 1})
     monkeypatch.setattr(
@@ -286,6 +293,8 @@ def test_run_orchestrator_profiles_checks_and_exports_without_network(
         references=False,
         checkpoint_s=0.000001,
         snapshot=str(snapshot_path) if snapshot_enabled else None,
+        storage_backend=storage_backend,
+        hf_repo_id="team/dataset" if storage_backend == "huggingface" else None,
     )
     if readback_failure:
         from src.benchmark.measurements import SessionMeasurements, session_report

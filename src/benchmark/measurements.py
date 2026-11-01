@@ -1,7 +1,8 @@
 """Full-session resources with independently durable, checksummed sample segments.
 
 The root is the runner/notebook process, including its baseline RSS and descendants.
-Disk covers run data/work and telemetry staging, not packages or remote Drive quota.
+Disk covers run data/work, telemetry staging and configured snapshot/HF staging/cache,
+not packages or remote storage quota.
 Peaks are sampled observations. An unfinalized session has only a measured lower bound.
 """
 
@@ -52,9 +53,13 @@ class SessionMeasurements:
         interval_s: float = 1,
         disk_every_s: float = 30,
         flush_s: float = 30,
+        publisher=None,
+        extra_disk_paths=(),
     ):
         self.stage, self.remote, self.local = stage, remote / "measurements" / session_id, local
         self.session_id = session_id
+        self.publisher = publisher
+        self.extra_disk_paths = tuple(Path(p) for p in extra_disk_paths)
         self.interval_s, self.disk_every_s, self.flush_s = interval_s, disk_every_s, flush_s
         self.started = time.monotonic()
         self.phase = "prepare-or-restore"
@@ -81,7 +86,10 @@ class SessionMeasurements:
                 disk_every_s=disk_every_s,
                 flush_target_s=flush_s,
                 rss_scope="runner/notebook process and all descendants, baseline included",
-                disk_scope="local run data/work and telemetry staging; excludes environment/Drive",
+                disk_scope=(
+                    "run data/work, telemetry, configured snapshot and HF staging/cache; "
+                    "excludes environment"
+                ),
             ),
         )
 
@@ -94,13 +102,14 @@ class SessionMeasurements:
         write_json(self.remote / name, value)
         if json.loads((self.remote / name).read_text(encoding="utf-8")) != value:
             raise OSError("Telemetry read-back verification failed")
+        if self.publisher is not None:
+            self.publisher(self.remote / name, value)
 
     def sample(self, *, final: bool = False) -> None:
         now = time.monotonic()
         if final or now - self.last_disk >= self.disk_every_s:
-            self.disk = sum(
-                dir_size(p) for p in (self.local / "data", self.local / "work", self.stage)
-            )
+            paths = (self.local / "data", self.local / "work", self.stage, *self.extra_disk_paths)
+            self.disk = sum(p.stat().st_size if p.is_file() else dir_size(p) for p in paths)
             self.free = shutil.disk_usage(self.stage).free
             self.last_disk = now
         rss, processes = tree_rss(self.proc)

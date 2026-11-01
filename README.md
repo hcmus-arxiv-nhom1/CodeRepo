@@ -205,4 +205,14 @@ they must be disclosed separately from the measured benchmark.
 
 The notebook stays pinned to an immutable implementation commit. Local-only commits must be
 published to the configured repository before they can be fetched by a fresh web Colab runtime.
-This change keeps the existing Drive backend; Hugging Face storage is a separate step.
+The storage backend is selected explicitly; see the Hugging Face setup guide below.
+
+### Hugging Face output backend
+
+The unified notebook now defaults to a **100-ID HF smoke** with the private Dataset
+`PancakeDang/arxiv-nhom1-introds`. Store a writable token as `HF_TOKEN` in Colab Secrets.
+See [HF setup, raw layout and resume](docs/huggingface_colab.md) before running.
+Set `storage_backend="huggingface", hf_repo_id="PancakeDang/arxiv-nhom1-introds"` in
+BenchmarkConfig for programmatic use. The default Python API remains Drive-compatible.
+HF mode uses local checkpoint staging, uploads raw deltas, and restores a completed
+commit with checksum verification. Existing Drive runs must not be resumed as HF runs.

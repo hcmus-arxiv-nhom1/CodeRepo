@@ -231,3 +231,23 @@ def test_drive_failure_still_finalizes_measurements_locally(tmp_path, monkeypatc
     report, rows = session_report(local)
     assert not report["complete"] and report["observed_wall_lower_bound_s"] >= 10
     assert rows and list((local / "work/measurements").glob("*/summary.json"))
+
+
+def test_disk_measurement_includes_snapshot_and_hf_staging(tmp_path, monkeypatch):
+    from src.benchmark import measurements as m
+
+    monkeypatch.setattr(m, "tree_rss", lambda p: (1, 1))
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_bytes(b"x" * 1500)
+    staging = tmp_path / "hf-staging"
+    staging.mkdir()
+    (staging / "source.tex").write_bytes(b"x" * 500)
+    sampler = m.SessionMeasurements(
+        tmp_path / "stage",
+        tmp_path / "remote",
+        tmp_path / "run",
+        "extra",
+        extra_disk_paths=[snapshot, staging],
+    )
+    sampler.sample()
+    assert sampler.rows[-1]["disk_bytes"] >= 2000

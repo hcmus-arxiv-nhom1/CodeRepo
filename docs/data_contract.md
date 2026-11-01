@@ -134,3 +134,12 @@ M2 (agreed now): a version without TeX must still be recorded as empty (*"record
 Per-range summaries (success rate, mean sizes, mean references) are not a separate file: the notebook computes them with `groupby("range_owner")` on `papers_stats.csv`, so the two can never disagree. The testbed (`cpu_count`, `ram_total_mb`, `platform`) is in each chunk's `profile_summary.json`.
 
 **`resource_timeseries.csv`** — `t_sec, rss_total_mb, disk_mb`, the profiler samples of every chunk placed end to end.
+
+## Hugging Face raw storage
+
+HF runs use `runs/<RUN_ID>/data/corpus/<YYMM>/<sequence-prefix>/<paper>/vN/` remotely;
+only the transport adds shards. Verified restore produces the existing flat local corpus
+contract for M2. `INDEX.json` stores flat names, SHA-256 hashes and empty version directories;
+`LATEST.json` pins the last completed data commit. Independent measurements are overlaid
+from later Hub commits. Corpus source bytes and metadata are never packed into a ZIP by
+this backend. See huggingface_colab.md for setup and operator handoff.

@@ -122,3 +122,13 @@ the discovery_time CSV metric, in addition to per-chunk discovery_s. Do not add 
 to session wall time. Input manifest hashing plus Kaggle download/unzip are pre-session
 setup costs and are disclosed separately. Historical version title/author API requests
 remain in per-chunk discovery time. Coverage is relative to the recorded snapshot release.
+
+## Hugging Face storage revision
+
+New HF runs include configured snapshot bytes, local checkpoint mirror, temporary Hub
+read cache and Xet cache in disk sampling. Old benchmark CSVs are not retroactively
+corrected: the earlier snapshot smoke disk_max omitted its multi-GB input. HF upload and
+restore costs are measured in session wall/RAM; periodic uploads also appear inside chunk
+profiles. Checkpoint events include upload plus completion-pointer publication, followed
+by an independently published timing record. Final evidence publication after the sampler
+finishes is explicitly outside the session interval. See huggingface_colab.md for scope.
