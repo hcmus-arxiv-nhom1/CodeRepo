@@ -57,7 +57,7 @@ def test_the_notebook_does_the_steps_in_order(cells):
     ]
     ids = [c.get("id") for c in cells]
     assert [ids.index(i) for i in order] == sorted(ids.index(i) for i in order)
-    for needle in ("Checkpoints(", "--expect-assigned", "src.benchmark.m2_benchmark",
+    for needle in ("restore_m2(", "--expect-assigned", "src.benchmark.m2_benchmark",
                    "sync_to_drive(", "restore_from_drive(", "src.qa.check_tables",
                    "src.qa.audit_structure", "src.qa.audit_sample",
                    "src.analysis.stats"):  # fmt: skip
@@ -157,16 +157,19 @@ def test_qa_and_export_do_not_run_until_output_exists(cells):
 
 def test_restore_checks_cached_corpus_against_pinned_checkpoint(cells):
     restore = cell(cells, "restore-corpora")
-    assert "verify_restored_checkpoint" in restore
+    assert "restore_m2(" in restore
+    assert "expected_index_sha256" in restore
+    assert "REUSE_PARTIAL_RESTORE" in restore
     assert "crawl_index_sha256" in restore
     assert "hashlib.sha256" in restore
 
 
-def test_notebook_starts_in_smoke_mode_with_explicit_sample(cells):
+def test_notebook_starts_in_full_mode_and_can_select_a_smoke_sample(cells):
     values = {}
     exec(cell(cells, "directory-config"), values)
     exec(cell(cells, "run-config"), values)
-    assert values["RUN_MODE"] == "smoke"
+    assert values["RUN_MODE"] == "full"
+    assert values["M2_RUN_ID"] == "m2-full-01"
     assert values["SMOKE_LIMIT"] == 1000
     assert values["SMOKE_OFFSET"] == 0
     assert '"--limit"' in cell(cells, "benchmark")
@@ -216,3 +219,12 @@ def test_smoke_manifest_rejects_changed_selection_on_resume(cells, tmp_path):
     values["SMOKE_OFFSET"] = 1
     with pytest.raises(ValueError, match="smoke_offset"):
         exec(cell(cells, "write-manifest"), values)
+
+
+def test_m2_restore_has_bounded_parallelism_and_explicit_partial_reuse(cells):
+    values = {}
+    exec(cell(cells, "run-config"), values)
+    assert values["RESTORE_WORKERS"] == 8
+    assert values["REUSE_PARTIAL_RESTORE"] is False
+    restore = cell(cells, "restore-corpora")
+    assert "RESTORE_WORKERS" in restore and "on_progress=" in restore

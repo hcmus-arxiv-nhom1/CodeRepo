@@ -452,6 +452,31 @@ def test_workers_receive_only_their_papers_external_bbl(corpus, tmp_path, monkey
     assert dict(seen)["2606-00003"] == set()
 
 
+def test_committed_paper_rows_are_released_during_run(corpus, tmp_path, monkeypatch):
+    import weakref
+
+    import src.parser.run as runner
+
+    original = runner.process_paper
+    first = None
+    released = []
+
+    def observe(*args, **kwargs):
+        nonlocal first
+        if first is not None:
+            released.append(first() is None)
+        outcome = original(*args, **kwargs)
+        if first is None:
+            first = weakref.ref(outcome)
+        return outcome
+
+    monkeypatch.setattr(runner, "process_paper", observe)
+    summary = go(corpus, tmp_path, shard_papers=1)
+    assert any(released), "committed outcomes remained alive until the run ended"
+    assert summary["papers_this_run"] == 5
+    assert summary["version_status_this_run"]["error"] == 1
+
+
 def test_cli_parses_external_bbl_into_parquet(corpus, tmp_path):
     import hashlib
 

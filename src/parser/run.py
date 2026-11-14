@@ -614,7 +614,9 @@ def run(
     interrupted = True
     journal = Journal(work_dir / "shards.jsonl")
     done, committed = journal.load()
-    this_run: list[PaperOutcome] = []
+    papers_this_run = 0
+    papers_failed = 0
+    version_status: Counter = Counter()
     written = Counter()
     assigned: dict | None = None
     try:
@@ -698,7 +700,9 @@ def run(
         unreported = 0
         try:
             for outcome in _outcomes(pending, options, crawl_index(crawl_work_dir), workers):
-                this_run.append(outcome)
+                papers_this_run += 1
+                papers_failed += outcome.error is not None
+                version_status.update(v["status"] for v in outcome.versions)
                 buffer.append(outcome)
                 buffered_rows += sum(count_rows(outcome.rows).values())
                 if outcome.error:
@@ -722,7 +726,9 @@ def run(
             started_at,
             time.perf_counter() - t0,
             interrupted,
-            this_run,
+            papers_this_run,
+            papers_failed,
+            version_status,
             done,
             written,
             workers,
@@ -746,8 +752,9 @@ def _id_of(path: Path) -> str:
         return path.name
 
 
-def _summary(started_at, wall_s, interrupted, outcomes, done, written, workers, options) -> dict:
-    versions = Counter(v["status"] for o in outcomes for v in o.versions)
+def _summary(
+    started_at, wall_s, interrupted, papers, failed, versions, done, written, workers, options
+) -> dict:
     return {
         "started_at": started_at,
         "finished_at": _now(),
@@ -755,9 +762,9 @@ def _summary(started_at, wall_s, interrupted, outcomes, done, written, workers, 
         "scan_only": options.scan,
         "workers": workers,
         "wall_s": round(wall_s, 3),
-        "papers_this_run": len(outcomes),
-        "papers_failed_this_run": sum(o.error is not None for o in outcomes),
-        "avg_paper_s": round(wall_s / len(outcomes), 4) if outcomes else None,
+        "papers_this_run": papers,
+        "papers_failed_this_run": failed,
+        "avg_paper_s": round(wall_s / papers, 4) if papers else None,
         "papers_committed_total": len(done),
         "version_status_this_run": dict(versions),
         "rows_written_this_run": {k: written[k] for k in ("elements", "hierarchy", "bibtex")},
