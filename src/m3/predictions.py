@@ -75,15 +75,18 @@ def load_partitions(path: Path) -> dict[str, str]:
     return out
 
 
-def load_groundtruth(labels_dir: Path) -> tuple[dict[str, dict[str, str | None]], dict[str, str]]:
-    """Load all manual & auto label matrices: ``(truth[pid][key], method[pid])``.
+def load_groundtruth(
+    labels_dir: Path, *, arxiv_ids: set[str] | None = None
+) -> tuple[dict[str, dict[str, str | None]], dict[str, str]]:
+    """Load label matrices for the requested papers, or all papers by default.
 
-    Manual labels take precedence if a paper ever appears under both folders (which should not
-    happen under the split rules, so we raise on overlap).
+    Return ``(truth[pid][key], method[pid])`` and reject overlapping sources.
     """
     truth: dict[str, dict[str, str | None]] = {}
     methods: dict[str, str] = {}
     for method, pid, path in iter_label_files(labels_dir):
+        if arxiv_ids is not None and pid not in arxiv_ids:
+            continue
         if pid in methods:
             raise ValueError(f"{pid} appears in both {methods[pid]} and {method} labels")
         _, answers = read_matrix(path)

@@ -1,0 +1,52 @@
+{
+  "feature_version": 2,
+  "features": [
+    "title_similarity",
+    "entry_title_coverage",
+    "reference_title_coverage",
+    "title_length_ratio",
+    "title_missing",
+    "author_overlap",
+    "author_missing",
+    "year_difference",
+    "year_missing",
+    "explicit_arxiv_id"
+  ],
+  "partitions_sha256": "0d5163b18856060f55af383941c66334e7d2aae0d2d8be6d67ff6ef83fe11058",
+  "input_sha256": {
+    "labels": "f1501d322a6c641f102b5cb21f562b4dc7b4db45538bb9f7ff37911c82b05811",
+    "m2_bibtex": "72a992b19e8b5f998a854ea02e916a11d21b6214786190e2b2c248f50928a788",
+    "m1_references": "3b674ff33e008d7597dbada14815d56558ce288f7cd0688e5c543d8ab28a6d83"
+  },
+  "package_versions": {
+    "numpy": "2.5.4",
+    "scikit-learn": "1.9.0",
+    "pyarrow": "24.0.0"
+  },
+  "code_revision": "3eca5d0f770013265907c408d94d7105d00293dd",
+  "source_sha256": {
+    "model.py": "f8165191c5848cd39ed86465533d8c8087b442382de2758a93ef1b6663d1b0b0",
+    "train_model.py": "dd9ff28aefc8eb3135137e6d3590f29484a6a4250379c091f8740752431f1fae",
+    "cleaning.py": "c1c5f502086f67bcef91ad2d24f78116366457916fdb91572b40b4dc53758f60",
+    "candidates.py": "4f5ded6d0b6c0b2ed9e32ece8318311a3e587158dd983b30b6e1638c1bc5500e",
+    "labels.py": "5c6dd59d7e10f207363af507323f592543cb688dd3419da03ff513eb948fa9ac",
+    "predictions.py": "783420a3bba3057d794c1ce03038cfce745ad9864d1e7d50dde51b7fbd92ae0c"
+  },
+  "train_limit_per_method": null,
+  "selected_model": "all_C0.1_balanced0",
+  "coefficients": [
+    5.384672671097133,
+    7.133261084791871,
+    6.129682436866571,
+    -0.4778453270333358,
+    0.08599876712992008,
+    3.184594659035393,
+    0.5658221460986431,
+    -1.0713904413967088,
+    -0.9795416728037085,
+    7.1761969151377585
+  ],
+  "intercept": -16.335777770061238,
+  "threshold": 1.8044164305062687,
+  "meets_baseline_mrr_floor": true
+}

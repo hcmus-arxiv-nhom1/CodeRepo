@@ -269,7 +269,34 @@ Colab notebooks for M3:
 
 ### Data Cleaning & Feature Engineering
 
-Text cleaning is centralized in `src/m3/cleaning.py` (LaTeX accent/command stripping, Unicode NFKD folding, lowercasing, stop-word removal for title content tokens, surname extraction for `Last, First` and `First Last` formats, and bounded new-style/old-style arXiv ID extraction). Raw pair-level signals (`title_sim`, `author_overlap`, `year_diff`, `id_in_entry`) and baseline `title_sim` MRR@5 are computed strictly on Train via `src/m3/analysis.py`. *(Final model features, justification table, and Test MRR@5 results will be added here once modeling finishes.)*
+The ranker shares the cleaning helpers in `src/m3/cleaning.py` and preserves Greek symbols and superscript charges when normalizing math in titles. The table shows evidence from manually labeled Train pairs. Means compare labeled matches with labeled nonmatches.
+
+| Feature group | Why it is used | Manual Train evidence |
+| --- | --- | --- |
+| Title similarity, directional token coverage and length ratio | Recognize equivalent titles and diagnose citations with a truncated title. | Mean title similarity 0.975 vs. 0.320. In `Brekke2024`, coverage was 1.000 from the entry and 0.714 from the candidate. |
+| Surname overlap | Distinguish papers with similar titles and recover evidence when titles are malformed. | Mean overlap 0.932 vs. 0.018. |
+| Absolute publication-year difference | Allow a small gap between the arXiv posting and citation year. | Mean difference 0.550 vs. 6.010 years with the model's missing-value encoding. |
+| Explicit arXiv ID | Use a direct identifier when the entry provides one. | Mean indicator 0.220 vs. 0.000. |
+| Missing title, author and year indicators | Distinguish absent metadata from observed disagreement. | The author-missing rate was 0.5% vs. 0.9%. |
+
+Train the classical logistic ranker from the frozen split, filtered M2 shards and the M1 references export:
+
+```bash
+python -m src.m3.train_model --m2-dir data/m2 --refs-dir m3/m1_tables_all/data/references \
+    --labels-dir m3/labels --partitions m3/partitions.csv --out-dir m3/ranker
+```
+
+For a smoke run, add `--train-limit-per-method 2` and use a separate output directory. Training compares title features, title plus surname overlap, and all features, including year and explicit arXiv ID. Directional title coverage and length ratio help expose partial-title matches. Missing-data indicators let the model distinguish absent metadata from disagreement.
+
+The full run used 2,004 Train papers and 2,439,592 labeled pairs. The selected logistic regression uses all feature groups, `C=0.1` and equal total weight per citation. Its abstention cutoff is 1.804416 in logit units. Valid contained eight papers, split evenly between manual and auto labels. Test evaluation is pending.
+
+| Valid metric | Title similarity | Selected ranker |
+| --- | ---: | ---: |
+| MRR@5 on all 308 entries | 0.5357 | 0.5390 |
+| MRR@5 on 166 matched entries | 0.9940 | 1.0000 |
+| No-match F1 | 0.9894 | 0.9965 |
+
+See the [frozen model](src/artifacts/m3-ranker/model.json), [Valid metrics by label source and configuration](src/artifacts/m3-ranker/valid_metrics.json), and [Train feature distributions](src/artifacts/m3-ranker/train_features.png). Point the prediction runtime at the artifact and pass `--ranker src.m3.model:rank_paper`. In section 5 of the Thiên notebook, use `RANKER = "src.m3.model:rank_paper"` and `os.environ["M3_MODEL_ARTIFACT"] = str(Path("src/artifacts/m3-ranker/model.json").resolve())` from the repository directory.
 
 ### Published Hugging Face Dataset Schema
 

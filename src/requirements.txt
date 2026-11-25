@@ -16,3 +16,6 @@ redis>=5.0.0
 huggingface_hub>=0.34,<2
 datasets>=2.14  # M3: reload check of the published dataset (src/m3/hf_dataset.py)
 filelock>=3.13,<4
+numpy>=1.26,<3
+scikit-learn>=1.5,<2
+matplotlib>=3.8,<4

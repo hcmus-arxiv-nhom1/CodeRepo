@@ -103,17 +103,16 @@ def iter_shard_papers(
     if not shard_files:
         raise FileNotFoundError(f"no shard-*/bibtex.parquet under {m2_dir}")
     refs_dataset = _open_references_dataset(refs_dir) if refs_dir is not None else None
+    filters = None if arxiv_ids is None else [("arxiv_id", "in", sorted(arxiv_ids))]
 
     for shard_file in shard_files:
         shard_name = shard_file.parent.name
-        table = pq.read_table(shard_file, columns=columns)
+        table = pq.read_table(shard_file, columns=columns, filters=filters)
         if table.num_rows == 0:
             continue
         by_paper: dict[str, list[dict]] = defaultdict(list)
         for row in table.to_pylist():
             pid = row["arxiv_id"]
-            if arxiv_ids is not None and pid not in arxiv_ids:
-                continue
             if only_range is not None and range_owner(pid) != only_range:
                 continue
             by_paper[pid].append(row)
