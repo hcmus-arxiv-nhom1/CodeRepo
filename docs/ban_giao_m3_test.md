@@ -37,13 +37,28 @@ assert not predictions.exists(), f"Choose a fresh output path: {predictions}"
 
 print("Revision", subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
 print("Model SHA-256", hashlib.sha256(artifact.read_bytes()).hexdigest())
-subprocess.run([
-    sys.executable, "-m", "src.m3.predictions",
-    "--m2-dir", str(M2_OUT), "--refs-dir", str(refs),
-    "--labels-dir", str(LABELS), "--partitions", str(parts),
-    "--out-dir", str(predictions), "--split-by-range",
-    "--ranker", "src.m3.model:rank_paper",
-], env={**os.environ, "M3_MODEL_ARTIFACT": str(artifact)}, check=True)
+subprocess.run(
+    [
+        sys.executable,
+        "-m",
+        "src.m3.predictions",
+        "--m2-dir",
+        str(M2_OUT),
+        "--refs-dir",
+        str(refs),
+        "--labels-dir",
+        str(LABELS),
+        "--partitions",
+        str(parts),
+        "--out-dir",
+        str(predictions),
+        "--split-by-range",
+        "--ranker",
+        "src.m3.model:rank_paper",
+    ],
+    env={**os.environ, "M3_MODEL_ARTIFACT": str(artifact)},
+    check=True,
+)
 ```
 
 Kiểm tra `predictions_summary.json` ghi 2.020 bài được yêu cầu, 2.020 bài được ghi và 0 bài thiếu trong M2. Kiểm tra đủ bốn thư mục `<dải>/data/predictions/`, cột `partition` kiểu dictionary và chỉ có `train`, `valid`, `test`.

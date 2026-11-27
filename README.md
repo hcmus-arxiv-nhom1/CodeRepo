@@ -250,16 +250,17 @@ python -m src.m3.split_partitions verify --labels-dir m3/labels --selection-csv 
 python -m src.m3.analysis --m2-dir data/m2 --corpus-dir data/corpus --labels-dir m3/labels \
     --partitions m3/partitions.csv --out-dir m3/analysis_train
 
-# 9. Run the trained ranker and export schema-validated predictions Parquet
-python -m src.m3.predictions --m2-dir data/m2 --refs-dir m3/m1_tables_all/data/references \
+# 9. Run the frozen trained ranker and export schema-validated predictions Parquet
+M3_MODEL_ARTIFACT=src/artifacts/m3-ranker/model.json python -m src.m3.predictions \
+    --m2-dir data/m2 --refs-dir m3/m1_tables_all/data/references \
     --labels-dir m3/labels --partitions m3/partitions.csv --out-dir m3/predictions_by_range \
-    --ranker <module:function> --split-by-range
+    --ranker src.m3.model:rank_paper --split-by-range
 
 # 10. Package all 6 Parquet tables under data/<table>/*.parquet and publish to Hugging Face
 python -m src.m3.package_dataset --m1-dir m3/m1_tables_by_range --m2-dir data/m2 \
     --predictions-dir m3/predictions_by_range --labels-dir m3/labels --out-dir m3/packages --mode by-range
 HF_TOKEN=... python -m src.m3.hf_dataset --package-dir m3/packages/thien \
-    --repo-id <hf-user>/arxiv-nhom1-thien --range thien --labels-dir m3/labels --strict-schema
+    --repo-id ThienCao/arxiv-nhom1-thien --range thien --labels-dir m3/labels --strict-schema
 ```
 
 Colab notebooks for M3:
@@ -288,13 +289,23 @@ python -m src.m3.train_model --m2-dir data/m2 --refs-dir m3/m1_tables_all/data/r
 
 For a smoke run, add `--train-limit-per-method 2` and use a separate output directory. Training compares title features, title plus surname overlap, and all features, including year and explicit arXiv ID. Directional title coverage and length ratio help expose partial-title matches. Missing-data indicators let the model distinguish absent metadata from disagreement.
 
-The full run used 2,004 Train papers and 2,439,592 labeled pairs. The selected logistic regression uses all feature groups, `C=0.1` and equal total weight per citation. Its abstention cutoff is 1.804416 in logit units. Valid contained eight papers, split evenly between manual and auto labels. Test evaluation is pending.
+The full run used 2,004 Train papers and 2,439,592 labeled pairs. The selected logistic regression uses all feature groups, `C=0.1` and equal total weight per citation. Its abstention cutoff is 1.804416 in logit units. Valid and Test each contain eight held-out papers (four manual and four auto, one pair per member range).
 
 | Valid metric | Title similarity | Selected ranker |
 | --- | ---: | ---: |
 | MRR@5 on all 308 entries | 0.5357 | 0.5390 |
 | MRR@5 on 166 matched entries | 0.9940 | 1.0000 |
 | No-match F1 | 0.9894 | 0.9965 |
+
+The frozen ranker (`model.json`, SHA-256 `97031da7...`, revision `8143c08`) was evaluated once on the locked Test split (`partitions.csv`, SHA-256 `0d5163b1...`), exporting 85,350 prediction rows across all 2,020 split publications (0 missing in M2) and 346 held-out Test citations:
+
+| Held-out Test subset | Entries (matched) | MRR@5 (all entries) | MRR@5 (matched only) | Recall@1 / @5 | No-match Precision | No-match Recall | No-match F1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Manual (4 papers) | 183 (97) | 0.5027 | 0.9485 | 0.9485 / 0.9485 | 0.9444 | 0.9884 | 0.9659 |
+| Auto (4 papers) | 163 (83) | 0.5031 | 0.9880 | 0.9880 / 0.9880 | 0.9877 | 1.0000 | 0.9938 |
+| Combined Test (8 papers) | 346 (180) | 0.5029 | 0.9667 | 0.9667 / 0.9667 | — | — | — |
+
+Error analysis on Test (treating no-match as the positive class): among the 180 matched entries, all 174 accepted predictions placed the true reference at rank 1 (`Recall@1 == Recall@5`), while 6 matched entries (5 manual, 1 auto) were falsely abstained (`FP` for no-match). Among the 166 true no-match entries, 165 were correctly abstained and 1 manual entry received candidates (`FN` for no-match).
 
 See the [frozen model](src/artifacts/m3-ranker/model.json), [Valid metrics by label source and configuration](src/artifacts/m3-ranker/valid_metrics.json), and [Train feature distributions](src/artifacts/m3-ranker/train_features.png). Point the prediction runtime at the artifact and pass `--ranker src.m3.model:rank_paper`. In section 5 of the Thiên notebook, use `RANKER = "src.m3.model:rank_paper"` and `os.environ["M3_MODEL_ARTIFACT"] = str(Path("src/artifacts/m3-ranker/model.json").resolve())` from the repository directory.
 
@@ -310,6 +321,13 @@ Each published dataset repository contains flat, zstd-compressed sharded Parquet
 | `hierarchy` | `data/hierarchy/*.parquet` | `arxiv_id` (non-null), `version` (`int32`), `element_id` (non-null), `parent_id` (non-null) |
 | `bibtex` | `data/bibtex/*.parquet` | `arxiv_id` (non-null), `citation_key` (non-null), `entry_type` (`dictionary`), `title`, `authors` (`list<string>`), `year` (`int32`), `doi`, `journal`, `url` |
 | `predictions` | `data/predictions/*.parquet` | `arxiv_id` (non-null), `partition` (`dictionary`: `train`/`valid`/`test`), `citation_key` (non-null), `groundtruth_arxiv_id`, `cand_1`..`cand_5` |
+
+Public Hugging Face datasets by assigned ID range (all 6 tables + 505 label CSVs per range, verified streaming-ready):
+
+- **Thiên (`2606.30734`–`2607.03693`):** <https://huggingface.co/datasets/ThienCao/arxiv-nhom1-thien>
+- **Tiến (`2606.25734`–`2606.30733`):** <https://huggingface.co/datasets/tientrm/arxiv-nhom1-tien>
+- **Hiếu (`2606.05734`–`2606.10733`):** <https://huggingface.co/datasets/HIULAPTOP/arxiv-nhom1-hieu>
+- **Đăng (`2604.20535`–`2604.25534`):** <https://huggingface.co/datasets/PancakeDang/arxiv-nhom1-dang>
 
 ## References
 
