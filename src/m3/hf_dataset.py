@@ -10,7 +10,8 @@
     hierarchy/*.parquet  bibtex/*.parquet  predictions/*.parquet
 
 The script checks the folders, writes a dataset card with YAML ``configs`` (one config per
-table, no loading script) when ``README.md`` is missing, creates the repo **public** on the
+table, no loading script) for the real ``--repo-id`` (replacing any card written earlier,
+e.g. by the packager with a ``<hf-user>`` placeholder), creates the repo **public** on the
 token owner's account, uploads the folder (plus the label matrices of this range under
 ``labels/``) and then reloads every table with ``datasets`` in streaming mode. The token is
 read from ``HF_TOKEN`` (Colab Secret) and is never printed or written to disk.
@@ -185,9 +186,9 @@ def main(argv=None) -> None:
     if a.labels_dir:
         print(f"labels: {stage_labels(a.labels_dir, a.range, a.package_dir)} files")
     readme = a.package_dir / "README.md"
-    if not readme.exists():
-        readme.write_text(card(a.repo_id, a.range, rows, prefix=prefix), encoding="utf-8")
-        print(f"wrote {readme}")
+    # always rewrite: a card left by the packager may name a placeholder repo
+    readme.write_text(card(a.repo_id, a.range, rows, prefix=prefix), encoding="utf-8")
+    print(f"wrote {readme}")
     if a.dry_run:
         return
 

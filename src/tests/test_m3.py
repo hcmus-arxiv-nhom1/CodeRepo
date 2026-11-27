@@ -188,6 +188,7 @@ def test_select_analysis_crosscheck_hf(tmp_path, capsys):
     for t in hf_dataset.TABLES:
         (pkg / t).mkdir(parents=True)
         pq.write_table(to_table("bibtex", load_bibtex(m2, [PID])), pkg / t / "part-0.parquet")
+    (pkg / "README.md").write_text('load_dataset("<hf-user>/arxiv-nhom1-tien")', encoding="utf-8")
     hf_dataset.main(
         [
             "--package-dir",
@@ -205,6 +206,7 @@ def test_select_analysis_crosscheck_hf(tmp_path, capsys):
     assert not (pkg / "labels" / "manual" / "2604-20600.csv").exists()
     card = (pkg / "README.md").read_text(encoding="utf-8")
     assert "config_name: predictions" in card and "path: bibtex/*.parquet" in card
+    assert 'load_dataset("u/d"' in card and "<hf-user>" not in card
 
 
 def test_restore_inputs_copies_only_verified_references(tmp_path):
